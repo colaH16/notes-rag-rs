@@ -180,7 +180,7 @@ form.addEventListener("submit", async event => {
   const searchFolder = selectedFolder;
   const generation = viewGeneration;
   results.replaceChildren(); status.className = "loading";
-  status.textContent = "노트의 의미를 비교하고 있습니다…";
+  status.textContent = "자료의 의미를 비교하고 있습니다…";
   document.querySelector('.search-again').hidden = false;
   // Keep the desktop refinement loop at the query. Only phones need to dismiss
   // the keyboard and bring the below-fold results into view.
@@ -199,14 +199,14 @@ form.addEventListener("submit", async event => {
     if (!response.ok) throw new Error(body.error || "검색에 실패했습니다.");
     if (body.audience) showAccess(body.audience === 'owner');
     status.className = "";
-    status.textContent = body.results.length ? `${body.results.length}개의 관련 노트 · ${body.scoped_pages.toLocaleString()}개 문서에서 검색${body.cached ? " · 캐시 결과" : ""}` : "선택한 범위에서 일치하는 노트를 찾지 못했습니다. 범위를 넓히거나 다른 표현으로 검색해 보세요.";
+    status.textContent = body.results.length ? `${body.results.length}개의 관련 자료 · ${body.scoped_pages.toLocaleString()}개 문서에서 검색${body.cached ? " · 캐시 결과" : ""}` : "선택한 범위에서 일치하는 자료를 찾지 못했습니다. 범위를 넓히거나 다른 표현으로 검색해 보세요.";
     if (body.blog_unavailable) status.textContent += ' · 블로그 연결을 확인하지 못해 블로그 결과는 제외했습니다.';
     body.results.forEach((item, index) => {
       const card = element("article", undefined, "result-card");
       const head = element("div", undefined, "result-heading");
       head.append(element("span", String(index + 1).padStart(2, "0"), "number"));
       const title = element("h2");
-      const link = element("a", item.title || "제목 없는 노트");
+      const link = element("a", item.title || "제목 없는 자료");
       // Defense in depth: text/URLs are never inserted as HTML.
       const url = new URL(item.url);
       const blog = item.source_kind === 'wordpress';
