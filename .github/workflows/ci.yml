@@ -74,9 +74,9 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Read-only, non-root, no-network image smoke
-        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
         run: |
           image=${{ steps.name.outputs.image }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/sh "$image" -ec 'test -x /app; test -r "$RAG_TOKENIZER_PATH"'
           docker run --rm --entrypoint /bin/sh "$image" -c 'id -u; id -g' | tr '\n' ' ' | grep -q '^4261 4261 '
           ! docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges -e RAG_ROLE=mcp "$image"
       - name: Record architecture digest

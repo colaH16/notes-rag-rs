@@ -20,7 +20,8 @@ FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && install -d -m 0755 /app
 
 COPY --chmod=0755 target/release/notes-rag-rs /usr/local/bin/notes-rag-rs
 COPY --chmod=0644 build/qwen-tokenizer.json /app/qwen-tokenizer.json
