@@ -31,3 +31,12 @@ ghcr.io/colah16/notes-rag-rs@sha256:2dfa9c47157f348d7ddd1ffea22dc4b2036efe422abc
 ## 되돌리기
 
 기존 GitOps의 두 Deployment를 이전 이미지·args 설정으로 복구합니다. 데이터 형식·PVC·DB 스키마를 바꾸지 않았으며, Python 생산자 잡과의 호환성 서명 검사를 계속 적용합니다. 진행 중이던 로그인은 전환 때 다시 시작해야 할 수 있습니다.
+
+
+## 2026-10-31 V7 플럼·공통 헤더 후속 배포
+
+사용자가 RAG 보류를 해제하고 전체 적용을 승인해 검색·지도·원문에 공통 헤더와 V7 색상을 반영했습니다. 앱 소스 `553f47ab954202484204e6e96f445ce3b097d633`, 웹 이미지 `sha256:a414710b0307eec22dd35af3f17d8fe97a6b480ea844bee7eee33a653f70af4c`, [CI](https://github.com/colaH16/notes-rag-rs/actions/runs/41189528214)는 amd64·arm64와 격리 DB 통합 시험을 통과했습니다. GitOps `61-web.yaml` 이미지만 변경했고 MCP 이미지·PVC·환경·인증·검색·색인 설정은 보존했습니다. Deployment Ready를 확인했습니다.
+
+RAG 미리보기50조합(검색/지도 공개·소유자와 원문,1440/1024/768/390/320px,라이트/다크), 실운영 검색·지도12조합과 공개 원문6조합을 검수했습니다. 헤더·팔레트·테마·본문 바로가기·가로 넘침 문제는 없었습니다. 공개 지도 API200·공개 문서2132개/연결8157개 로드와 실제 공개 원문 표시를 확인했고 유료 검색·실계정 로그인/로그아웃·저장은 하지 않았습니다.
+
+기존 CSP는 Cloudflare 자동 삽입 통계 beacon만 계속 차단하며, 공유 헤더 JS/JSON/스타일은 허용돼 정상 표시됩니다. CSP를 통계 때문에 넓히지 않았습니다. 임베디드 자산의 의도한 UI 차이는 README9와 compat/static-assets.sha256에 기록했습니다. Safari/iOS 실기, adoptedStyleSheets가 없는 구형 브라우저, 실제 계정 조작은 별도 범위입니다. 다른 사이트 포함 전체 운영 검수는 GitOps `scripts/branding/shared-header-v7-verification.json`을 봅니다.
