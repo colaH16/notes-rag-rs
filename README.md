@@ -222,10 +222,10 @@ DB 스키마는 바꾸지 않습니다. Rust는 DDL을 실행하지 않으며 �
 
 ### 화면: cola16 공통 헤더 (2026-10-31)
 
-검색(`/`), 노트 지도(`/graph`), 원문 보기(`/read`)는 원본의 상단 막대·테마 선택·`cola-spaces` 메뉴 대신 공통 `<cola-header>` 하나를 씁니다. 왼쪽 로고, 가운데 공통 메뉴 다섯 개, 오른쪽 테마 버튼(자동→라이트→다크)과 기존 로그인/로그아웃입니다. 계약은 KubeShelf 저장소의 `docs/cola16-navigation.md`입니다. 백엔드(검색·인증·세션·요청 한도·ACL·색인·MCP·Markdown 정제)는 바뀌지 않았습니다.
+검색(`/`), 노트 지도(`/graph`), 원문 보기(`/read`)는 원본의 상단 막대·테마 선택·`cola-spaces` 메뉴 대신 공통 `<cola-header>` 하나를 씁니다. 왼쪽 로고, 가운데 공통 메뉴 다섯 개, 오른쪽 기존 로그인/로그아웃과 테마 버튼(자동→라이트→다크)입니다. 계약은 KubeShelf 저장소의 `docs/cola16-navigation.md`입니다. 백엔드(검색·인증·세션·요청 한도·ACL·색인·MCP·Markdown 정제)는 바뀌지 않았습니다.
 
 - 스크립트 `https://apps.cola16.app/branding/v1/cola-header.js`는 `async`로 읽어 첫 화면을 막지 않습니다. 헤더는 Shadow DOM에 그리므로 페이지 CSS가 글꼴·간격을 바꾸지 못하고, 메뉴 JSON은 쿠키 없이 읽습니다. 계정·세션 정보는 공급자로 보내지 않습니다.
-- `#login`/`#logout`은 light DOM의 `slot="account"`에 있어 기존 JS가 그대로 찾고 동작합니다. `PUBLIC LIBRARY`/`OWNER` 표시(`#access-badge`, `#audience`)와 원문 보기의 돌아가기·접근 표시·편집 링크는 헤더 아래 `<main>` 안으로 옮겼습니다. 중복이던 `지식 지도 ↗`와 `검색으로 돌아가기 ↗`는 공통 메뉴의 `노트 지도`/`노트 검색`으로 대체했습니다.
+- `#login`/`#logout`은 래퍼 없이 `<cola-header>`의 직접 자식(`slot="account"`)이라 기존 JS가 그대로 찾고 동작하며(id·`hidden`·`/auth/login?next=/graph`·로그아웃 POST 동일), 세션 확인 전에는 둘 다 숨김입니다. 모양(`로그인`/`로그아웃` 테두리 버튼)은 공통 헤더 CSS가 KubeShelf와 같게 정하므로 이 저장소에는 계정 버튼 스타일이 없습니다. 테마 버튼은 그 오른쪽 끝에 고정되어 로그인 여부와 관계없이 같은 자리입니다. `PUBLIC LIBRARY`/`OWNER` 표시(`#access-badge`, `#audience`)와 원문 보기의 돌아가기·접근 표시·편집 링크는 헤더 아래 `<main>` 안으로 옮겼습니다. 중복이던 `지식 지도 ↗`와 `검색으로 돌아가기 ↗`는 공통 메뉴의 `노트 지도`/`노트 검색`으로 대체했습니다.
 - JavaScript가 없거나 공급자가 응답하지 않으면 같은 출처의 `/cola-header.css`와 페이지 안의 기본 링크가 보입니다. 이 사본은 마지막으로 맞춘 시점의 것이며, 맞출 때만 KubeShelf에서 `npm --prefix web run build` 뒤 `python3 -I scripts/vendor-header-css.py <kubeshelf-rs>/web/dist/branding/v1/cola-header.css`를 실행하고 `compat/static-assets.sha256`을 갱신합니다. 테스트가 사본 머리말의 원본 해시와 `cola-header:not(:defined)` 범위를 확인합니다.
 - 색은 `cola-theme.css`의 V7 플럼(다크·라이트 역할 전체)입니다. 지도 노트북 색과 의미는 그대로입니다.
 - 알려진 제약: 공통 헤더는 생성한 스타일시트(`adoptedStyleSheets`)를 쓰므로 `style-src 'self'`에서도 스타일이 적용됩니다. 이를 지원하지 않는 오래된 브라우저(예: Safari 16.4 미만)에서는 헤더가 Shadow DOM 안에 `<style>`을 넣고, CSP가 이를 막아 헤더가 스타일 없이 보일 수 있습니다. CSP를 넓히지 않았습니다.

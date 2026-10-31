@@ -40,3 +40,8 @@ ghcr.io/colah16/notes-rag-rs@sha256:2dfa9c47157f348d7ddd1ffea22dc4b2036efe422abc
 RAG 미리보기50조합(검색/지도 공개·소유자와 원문,1440/1024/768/390/320px,라이트/다크), 실운영 검색·지도12조합과 공개 원문6조합을 검수했습니다. 헤더·팔레트·테마·본문 바로가기·가로 넘침 문제는 없었습니다. 공개 지도 API200·공개 문서2132개/연결8157개 로드와 실제 공개 원문 표시를 확인했고 유료 검색·실계정 로그인/로그아웃·저장은 하지 않았습니다.
 
 기존 CSP는 Cloudflare 자동 삽입 통계 beacon만 계속 차단하며, 공유 헤더 JS/JSON/스타일은 허용돼 정상 표시됩니다. CSP를 통계 때문에 넓히지 않았습니다. 임베디드 자산의 의도한 UI 차이는 README9와 compat/static-assets.sha256에 기록했습니다. Safari/iOS 실기, adoptedStyleSheets가 없는 구형 브라우저, 실제 계정 조작은 별도 범위입니다. 다른 사이트 포함 전체 운영 검수는 GitOps `scripts/branding/shared-header-v7-verification.json`을 봅니다.
+
+
+## 2026-10-31 로그인·테마 배치 후속 보정
+
+로그인·로그아웃을 공통 테마 아이콘 왼쪽으로 두고 검색·지도 모두 KubeShelf와 같은 테두리 버튼/로그인 문구를 쓰게 했다. 세션 확인 전 숨김과 로그인 지도 복귀 경로·로그아웃 POST 동작은 보존했다. 웹 이미지 `sha256:a56b7345719aeab53a1e6d4ea5040b8782e59ac3497738debe7c4f516b85f007` (소스 `5b13557a95e89f1138519e8f66fd2ef050773022`, [CI](https://github.com/colaH16/notes-rag-rs/actions/runs/41206481370))만 갱신했고 MCP·PVC·환경·인증·검색·색인 설정은 유지했다. 공통 헤더 미리보기100조합, RAG 제공 실패40조합, 전체 실운영30조합을 검수했다. 실소유자 로그인/로그아웃은 수행하지 않았다. GitOps `scripts/branding/shared-header-account-verification.json`이 현재 보정 기록이다.
