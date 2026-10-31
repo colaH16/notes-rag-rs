@@ -208,6 +208,8 @@ DB 스키마는 바꾸지 않습니다. Rust는 DDL을 실행하지 않으며 �
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked                                   # 단위 + 통합(웹/인증/MCP)
+# 원본 pruning_schema.sql의 GRANT 대상 역할을 테스트 클러스터에 먼저 생성(NOLOGIN)
+# psql <test-admin-url> -c "CREATE ROLE notes_rag_indexer NOLOGIN"
 RAG_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:PORT/postgres cargo test --test db   # 격리된 로컬 DB만
 # Python 오라클(고정 커밋 사본 + 고정 requirements.lock venv)
 RAG_TOKENIZER_PATH=… python -I tests/oracle/compare.py <python-src> target/debug/examples/oracle_probe

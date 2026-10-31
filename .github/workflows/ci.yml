@@ -102,6 +102,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - name: Bootstrap original schema grant target (test database only)
+        run: >-
+          docker exec '${{ job.services.postgres.id }}'
+          psql -U postgres -d postgres -v ON_ERROR_STOP=1
+          -c 'CREATE ROLE notes_rag_indexer NOLOGIN'
+
       - name: Rust toolchain 1.99.1
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Isolated PostgreSQL + pgvector search tests
