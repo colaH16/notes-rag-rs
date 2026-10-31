@@ -77,6 +77,11 @@ pub async fn run(env: &Env) -> Result<(), String> {
         config.note_prefix.clone(),
     )
     .map_err(|e| format!("web: {e}"))?;
+    let mut app = app;
+    app.blog = crate::blog::Source::from_env().map_err(|e| format!("blog source: {e}"))?;
+    if app.blog.is_some() {
+        app.cache_version.push_str(":wordpress-native-v1");
+    }
     let app = Arc::new(app);
     println!("Notes RAG web ready.");
     crate::serve::serve(

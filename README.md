@@ -282,3 +282,11 @@ python -I tests/oracle/dump_mcp_contract.py <python-src>      # 계약 재캡처
 - 로컬 PostgreSQL은 OpenSSL 헤더가 없어 TLS 없이 루프백으로만 시험했습니다. TLS 경로(verify-full 등)는 단위 시험만 했습니다.
 - 실제 OIDC 공급자의 discovery와 PKCE/state/nonce를 포함한 로그인 시작 리다이렉트를 확인했습니다. 사용자의 로그인 완료·기존 쿠키 재사용은 별도 확인 범위이며, 서명 검증은 모의 RS256 공급자 시험으로 검증했습니다.
 - 공개 검색 예산은 여전히 서버 전체 공유라서 익명 사용자가 소진시킬 수 있습니다(원본과 같음).
+
+## WordPress 검색·미리보기 확장
+
+`RAG_WORDPRESS_API`를 설정하면 공개 블로그 Markdown을 노트와 함께 검색한다.
+블로그 결과에는 출처·미리보기·WordPress 전문 보기 링크를 표시하며 편집 링크는
+제공하지 않는다. 이미지는 WordPress 공개 미디어 URL을 사용한다.
+[수집·권한·캐시·배포 경계](docs/wordpress.md)를 참고한다. 이 확장으로 변경한
+검색 JS와 페이지 범위 문구는 `compat/static-assets.sha256`에 명시적으로 고정한다.

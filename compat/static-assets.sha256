@@ -1,8 +1,9 @@
+# WordPress integration intentionally extends search JS and page scope text.
 # SHA-256 of every embedded frontend file (src/web/http.rs ASSETS).
 # Byte-identical to the pinned Python commit 754a97398ac1d6ef313605f84eb7249db8eb556e:
 a0a2e902d0fee881aa633ca2499cfa718d83f43113b3dcc3e42848cd5eff219f  graph-layout.js
 ee98011fde0131db569886bc7e6bc6e34dae6ee305854ca578fc8ef0918d034a  graph.js
-48f0ad70cd4f41bc8f38405d14ef0a57718d67e4d7ee4b610db1ec18a0a5391c  public_search.js
+87ad7c01e7068fba651f50b2d81b11ed79005c8778acc5db497f5e1346d19555  public_search.js
 5cab02bc71e43c750442be9fd2d2fc180015cdfc3f08d3145e6a374abbd29717  reader.js
 # changed: shared <cola-header>, its direct account-slot buttons and V7 plum tokens (2026-10-31, approved UI divergence; backend unchanged):
 9eac7e99e87771a9e2eab002c73dbc3ceaf81fb66fa702dc4b361fad99f7f0d8  cola-header.css
@@ -12,5 +13,5 @@ ee98011fde0131db569886bc7e6bc6e34dae6ee305854ca578fc8ef0918d034a  graph.js
 7f544a499391ed4af10021b257dcdae06812393a4b50aeeab8ceec2946e593d2  graph.css
 3b435b2a61c6f0f121a79797e37efbc5f4c0f6e6e3bea1381efe83983751f231  graph.html
 a49b4c08d138dab74397e62a1839d23f56c7472e5e14fe42053ed6886bb4afd6  public_search.css
-682d90f8adcee9295ca74c17d83d843169a981724f97741f745b3170da1c005a  public_search.html
+00aaa46e80ae05be15a670f18a32f49e95ac382bf4327788c2d32057b67c987e  public_search.html
 1b1616bd78a9cd340dba1af738ee5229485d8bc1329ab8ff76d1ecb759c2ef42  reader.css

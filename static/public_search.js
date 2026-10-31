@@ -111,7 +111,7 @@ function refreshFolderControls() {
   if (focused !== undefined) Array.from(folderColumns.querySelectorAll(".folder-row")).find(row => row.dataset.folder === focused)?.focus({preventScroll: true});
   folderUp.disabled = folderAll.disabled = running || foldersLoading || !selectedFolder;
   folderReload.disabled = running || foldersLoading;
-  document.querySelector("#folder-current").textContent = `선택 범위: ${selectedFolder || "전체 노트"} · 하위 폴더 포함`;
+  document.querySelector("#folder-current").textContent = selectedFolder ? `선택 범위: 노트 ${selectedFolder} · 하위 폴더 포함` : "선택 범위: 전체 자료 · 노트와 공개 블로그";
 }
 function chooseFolder(path, keyboard = false) {
   if (running || foldersLoading || path === selectedFolder) return;
@@ -200,6 +200,7 @@ form.addEventListener("submit", async event => {
     if (body.audience) showAccess(body.audience === 'owner');
     status.className = "";
     status.textContent = body.results.length ? `${body.results.length}개의 관련 노트 · ${body.scoped_pages.toLocaleString()}개 문서에서 검색${body.cached ? " · 캐시 결과" : ""}` : "선택한 범위에서 일치하는 노트를 찾지 못했습니다. 범위를 넓히거나 다른 표현으로 검색해 보세요.";
+    if (body.blog_unavailable) status.textContent += ' · 블로그 연결을 확인하지 못해 블로그 결과는 제외했습니다.';
     body.results.forEach((item, index) => {
       const card = element("article", undefined, "result-card");
       const head = element("div", undefined, "result-heading");
@@ -208,12 +209,21 @@ form.addEventListener("submit", async event => {
       const link = element("a", item.title || "제목 없는 노트");
       // Defense in depth: text/URLs are never inserted as HTML.
       const url = new URL(item.url);
-      if (url.origin !== "https://notes.cola16.app" || !url.pathname.startsWith("/OneNote/markdown/")) throw new Error("잘못된 출처 주소입니다.");
-      const pagePath = decodeURIComponent(url.pathname.slice('/OneNote/markdown/'.length));
-      const readUrl = '/read?' + new URLSearchParams({path: pagePath.endsWith('.md') ? pagePath : pagePath + '.md'});
+      const blog = item.source_kind === 'wordpress';
+      let readUrl;
+      if (blog) {
+        if (url.origin !== 'https://cola16.app' || url.username || url.password || url.search || url.hash || !Number.isSafeInteger(item.post_id) || item.post_id < 1) throw new Error('잘못된 블로그 출처입니다.');
+        readUrl = '/read-blog?' + new URLSearchParams({id: String(item.post_id)});
+      } else {
+        if (url.origin !== "https://notes.cola16.app" || !url.pathname.startsWith("/OneNote/markdown/")) throw new Error("잘못된 출처 주소입니다.");
+        const pagePath = decodeURIComponent(url.pathname.slice('/OneNote/markdown/'.length));
+        readUrl = '/read?' + new URLSearchParams({path: pagePath.endsWith('.md') ? pagePath : pagePath + '.md'});
+      }
       link.href = readUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
       title.append(link); head.append(title); card.append(head);
       const tags = element("div", undefined, "result-tags");
+      tags.append(element('span', blog ? 'WordPress 블로그' : '노트'));
+      if (blog && typeof item.published === 'string') tags.append(element('span', '작성 ' + item.published.slice(0,10)));
       tags.append(element("span", item.history ? "과거 기록 · 현재 방법과 다를 수 있음" : "현재 자료", item.history ? "old" : "current"));
       if (item.visual_review) tags.append(element("span", "원본 배치·필기 확인 권장"));
       card.append(tags);
@@ -222,8 +232,8 @@ form.addEventListener("submit", async event => {
       const expand = element("button", "발췌 펼치기"); expand.type = "button"; expand.setAttribute("aria-expanded", "false");
       expand.addEventListener("click", () => {const open = excerpt.classList.toggle("expanded"); expand.textContent = open ? "접기" : "발췌 펼치기"; expand.setAttribute("aria-expanded", String(open));});
       actions.append(expand);
-      const read = element("a", "원문 보기 ↗"); read.href = readUrl; read.target = "_blank"; read.rel = "noopener noreferrer"; actions.append(read);
-      const source = element("a", "SilverBullet에서 편집 ↗"); source.href = url.href; source.target = "_blank"; source.rel = "noopener noreferrer"; actions.append(source);
+      const read = element("a", blog ? "미리보기 ↗" : "원문 보기 ↗"); read.href = readUrl; read.target = "_blank"; read.rel = "noopener noreferrer"; actions.append(read);
+      const source = element("a", blog ? "WordPress에서 전문 보기 ↗" : "SilverBullet에서 편집 ↗"); source.href = url.href; source.target = "_blank"; source.rel = "noopener noreferrer"; actions.append(source);
       card.append(actions);
       if (item.truncated) card.append(element("p", "긴 문서의 일부입니다. 전체 내용은 원문에서 확인하세요.", "truncated"));
       results.append(card);

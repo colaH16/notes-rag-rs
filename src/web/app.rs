@@ -62,6 +62,7 @@ pub struct WebApp {
     /// `/OneNote/markdown/`
     pub note_prefix: String,
     pub cache_version: String,
+    pub blog: Option<crate::blog::Source>,
     lock: tokio::sync::Mutex<()>,
     folder_lock: tokio::sync::Mutex<()>,
     catalogs: Mutex<HashMap<Audience, (Value, Instant)>>,
@@ -106,6 +107,7 @@ impl WebApp {
             citation_prefix,
             note_prefix,
             cache_version: SEARCH_CACHE_VERSION.into(),
+            blog: None,
             lock: tokio::sync::Mutex::new(()),
             folder_lock: tokio::sync::Mutex::new(()),
             catalogs: Mutex::new(HashMap::new()),
@@ -159,20 +161,16 @@ impl WebApp {
             .await
     }
 
-    /// `visible_result(result, audience)`
+    /// Recheck both filesystem ACLs and live WordPress revisions on cache hits.
     async fn visible_result(&self, result: Value, audience: Audience) -> Result<Value> {
-        if self.reader.is_none() {
-            return Ok(result);
-        }
         let rows = result
             .get("results")
             .and_then(Value::as_array)
             .ok_or(Fault::Other("malformed result"))?;
         let mut paths = HashMap::new();
-        for row in rows {
-            let link = row
-                .get("url")
-                .and_then(Value::as_str)
+        for row in rows.iter().filter(|r| !crate::blog::is_blog(r)) {
+            let link = row["url"]
+                .as_str()
                 .ok_or(Fault::Other("malformed result"))?;
             let path = url::unquote(
                 &url::urlsplit(link)
@@ -184,24 +182,55 @@ impl WebApp {
                 .unwrap_or(&path);
             paths.insert(link.to_string(), format!("{relative}.md"));
         }
-        let visible = self
-            .visible(
-                paths.values().cloned().collect(),
-                audience == Audience::Owner,
+        let visible = if self.reader.is_some() {
+            Some(
+                self.visible(
+                    paths.values().cloned().collect(),
+                    audience == Audience::Owner,
+                )
+                .await?,
             )
-            .await?;
+        } else {
+            None
+        };
+        let mut failed = false;
+        let catalog = if rows.iter().any(crate::blog::is_blog) {
+            match &self.blog {
+                Some(source) => match source.catalog().await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        failed = true;
+                        Default::default()
+                    }
+                },
+                None => {
+                    failed = true;
+                    Default::default()
+                }
+            }
+        } else {
+            Default::default()
+        };
         let kept: Vec<Value> = rows
             .iter()
             .filter(|row| {
-                row["url"]
-                    .as_str()
-                    .and_then(|u| paths.get(u))
-                    .is_some_and(|p| visible.contains(p))
+                if crate::blog::is_blog(row) {
+                    return crate::blog::visible(row, &catalog);
+                }
+                visible.as_ref().is_none_or(|set| {
+                    row["url"]
+                        .as_str()
+                        .and_then(|u| paths.get(u))
+                        .is_some_and(|p| set.contains(p))
+                })
             })
             .cloned()
             .collect();
         let mut result = result.as_object().cloned().unwrap_or_default();
         result.insert("results".into(), kept.into());
+        if failed {
+            result.insert("blog_unavailable".into(), true.into());
+        }
         Ok(Value::Object(result))
     }
 
@@ -501,6 +530,32 @@ impl WebApp {
 
     // ----- reader -------------------------------------------------------
 
+    async fn read_blog(&self, request: Request) -> Response {
+        let headers = request.headers().clone();
+        let query = request.uri().query().unwrap_or("").as_bytes().to_vec();
+        drop(request);
+        let outcome = async {
+            let owner = self.owner(&headers)?;
+            self.traffic(if owner { "owner" } else { "public" }).await?;
+            let id = url::query_param(&query, "id")
+                .and_then(|s| s.parse::<i64>().ok())
+                .ok_or(Fault::NotReadable)?;
+            self.blog.as_ref().ok_or(Fault::NotReadable)?.page(id).await
+        }
+        .await;
+        match outcome {
+            Ok(page) => http::html(StatusCode::OK, page),
+            Err(Fault::NotReadable) => http::html(StatusCode::NOT_FOUND, NOT_READABLE_PAGE),
+            Err(Fault::Denied { message, .. }) => {
+                http::text(StatusCode::TOO_MANY_REQUESTS, message)
+            }
+            Err(_) => http::text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "블로그 미리보기를 잠시 사용할 수 없습니다.",
+            ),
+        }
+    }
+
     async fn read_document(&self, request: Request) -> Response {
         let headers = request.headers().clone();
         let query = request.uri().query().unwrap_or("").as_bytes().to_vec();
@@ -743,6 +798,7 @@ impl WebApp {
                         "/api/graph" => self.graph_data(request).await,
                         "/api/folders" => self.folders(request).await,
                         "/api/session" => self.session(&request),
+                        "/read-blog" => self.read_blog(request).await,
                         "/read" => self.read_document(request).await,
                         "/read-asset" => self.read_asset(request).await,
                         "/healthz" => http::json(StatusCode::OK, &json!({"status": "ok"})),
@@ -768,6 +824,7 @@ fn is_api_get(path: &str) -> bool {
             | "/api/folders"
             | "/api/session"
             | "/read"
+            | "/read-blog"
             | "/read-asset"
             | "/healthz"
             | "/robots.txt"
@@ -804,9 +861,29 @@ pub fn public_result(
         let link = row
             .get("source_url")
             .ok_or(Fault::Other("missing source_url"))?;
-        let Some(link) = link.as_str().filter(|u| u.starts_with(citation_prefix)) else {
+        let blog = row.get("source_kind").and_then(Value::as_str) == Some("wordpress");
+        let Some(link) = link.as_str().filter(|u| {
+            if blog {
+                crate::blog::valid_url(u)
+            } else {
+                u.starts_with(citation_prefix)
+            }
+        }) else {
             return Err(Fault::Value("Invalid citation URL"));
         };
+        if blog
+            && (!folder.is_empty()
+                || !row
+                    .get("post_id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| (1..10_000_000_000).contains(&id))
+                || !row
+                    .get("source_revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(crate::blog::valid_revision))
+        {
+            return Err(Fault::Value("Invalid blog citation"));
+        }
         if !folder.is_empty() {
             let path = url::unquote(
                 &url::urlsplit(link)
@@ -823,6 +900,19 @@ pub fn public_result(
         item.insert("title".into(), text::prefix(&title, 400).into());
         item.insert("excerpt".into(), text::prefix(&content, 6000).into());
         item.insert("url".into(), link.into());
+        if blog {
+            for key in [
+                "source_kind",
+                "post_id",
+                "source_revision",
+                "published",
+                "modified",
+            ] {
+                if let Some(value) = row.get(key) {
+                    item.insert(key.into(), value.clone());
+                }
+            }
+        }
         item.insert(
             "history".into(),
             (row.get("rag_priority").and_then(Value::as_str) == Some("fallback")).into(),
@@ -856,6 +946,9 @@ pub fn public_result(
     out.insert("indexed_pages".into(), indexed.into());
     out.insert("scoped_pages".into(), scoped.into());
     out.insert("folder".into(), folder.into());
+    if result.get("blog_unavailable").and_then(Value::as_bool) == Some(true) {
+        out.insert("blog_unavailable".into(), true.into());
+    }
     Ok(out)
 }
 

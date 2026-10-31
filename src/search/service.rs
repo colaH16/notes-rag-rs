@@ -73,6 +73,7 @@ pub struct ServiceState {
     owner: bool,
     slots: Arc<Semaphore>,
     graph: SemanticGraph,
+    blog: Option<Arc<crate::blog::Store>>,
 }
 
 impl Deref for SearchService {
@@ -143,7 +144,15 @@ impl SearchService {
             owner,
             slots: Arc::new(Semaphore::new(2)),
             graph: SemanticGraph::default(),
+            blog: None,
         })))
+    }
+
+    pub fn with_blog(mut self, blog: Option<Arc<crate::blog::Store>>) -> Result<Self> {
+        Arc::get_mut(&mut self.0)
+            .ok_or(Fault::Other("shared service builder"))?
+            .blog = blog;
+        Ok(self)
     }
 
     /// Run `work` under `bounded()` on its own task with shared state.
@@ -247,7 +256,7 @@ impl SearchService {
             {
                 rows.retain(|row| visible.contains(&row.relative_path));
             }
-            let results = rows
+            let mut results = rows
                 .iter()
                 .map(|row| {
                     result_item(
@@ -258,12 +267,40 @@ impl SearchService {
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(json!({
+            let mut info = info;
+            let mut blog_unavailable = false;
+            if request.folder.is_empty()
+                && let Some(blog) = &this.blog
+            {
+                match blog
+                    .search(
+                        &literal,
+                        request.limit,
+                        request.min_similarity,
+                        request.include_history,
+                    )
+                    .await
+                {
+                    Ok((hits, count)) => {
+                        for key in ["indexed_pages", "scoped_pages"] {
+                            let n = info.get(key).and_then(Value::as_i64).unwrap_or(0);
+                            info.insert(key.into(), (n + count as i64).into());
+                        }
+                        results = crate::blog::merge(results, hits, request.limit as usize);
+                    }
+                    Err(_) => blog_unavailable = true,
+                }
+            }
+            let mut response = json!({
                 "index": info,
                 "results": results,
                 "policy": POLICY,
                 "min_similarity": request.min_similarity,
-            }))
+            });
+            if blog_unavailable {
+                response["blog_unavailable"] = true.into();
+            }
+            Ok(response)
         })
         .await
     }
@@ -315,6 +352,12 @@ impl SearchService {
                 && !visible.contains(&hit.relative_path)
             {
                 row = None;
+            }
+            if row.is_none()
+                && let Some(blog) = &this.blog
+                && let Some(result) = blog.chunk(&page_key, ordinal).await?
+            {
+                return Ok(json!({"index":info.to_json(),"result":result}));
             }
             let result = match &row {
                 Some(hit) => result_item(hit, &this.base_url, &this.root, CHUNK_CHARACTERS)?,

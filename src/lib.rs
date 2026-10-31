@@ -6,6 +6,7 @@
 //! indexer produced, and refuses index generations it was not built for
 //! (see [`compat`]).
 
+pub mod blog;
 pub mod compat;
 pub mod config;
 pub mod embedding;

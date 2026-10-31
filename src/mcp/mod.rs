@@ -37,6 +37,15 @@ async fn services(
     let generation = manifest.config_signature();
     let tokenizer = Arc::new(QwenTokenizer::load(&config.tokenizer_path, manifest)?);
     let database = crate::search::db::Database::from_options(&config.database)?;
+    let blog = crate::blog::Source::from_env()
+        .map_err(|e| format!("blog source: {e}"))?
+        .map(|source| {
+            Arc::new(crate::blog::Store::new(
+                source,
+                database.clone(),
+                generation.clone(),
+            ))
+        });
     let (public_ids, public_revision) =
         load_public_notebooks(&config.access_policy, &allowlist.ids)
             .map_err(|e| format!("access policy: {e}"))?;
@@ -97,6 +106,7 @@ async fn services(
             Some(reader.clone()),
             owner,
         )
+        .and_then(|service| service.with_blog(blog.clone()))
         .map(Arc::new)
         .map_err(|e| format!("search service: {e}"))
     };

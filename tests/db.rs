@@ -543,3 +543,84 @@ async fn service_shapes_mcp_results_and_rejects_missing_folder_before_embedding(
     assert_eq!(value["indexed_pages"], 1);
     db.drop().await;
 }
+
+#[tokio::test]
+async fn wordpress_index_shares_vectors_but_not_note_scope_and_hides_changed_posts() {
+    use axum::Json;
+    use axum::routing::get;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    notes_rag_rs::install_crypto_provider();
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let ddl = include_str!("fixtures/python-schema/blog_schema.sql")
+        .lines()
+        .filter(|line| !line.starts_with("ALTER TABLE") && !line.starts_with("GRANT "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    db.client.batch_execute(&ddl).await.unwrap();
+    db.client.batch_execute("INSERT INTO notes_rag.blog_generation(config_signature) VALUES('config'); INSERT INTO notes_rag.blog_posts(id,page_key,revision,title,url,published,modified) VALUES(1,repeat('f',64),repeat('a',64),'Synthetic blog','https://cola16.app/synthetic/','2026-01-01','2026-01-02')").await.unwrap();
+    for (ordinal, priority, content, literal) in [
+        (
+            0_i32,
+            "normal",
+            "Blog before",
+            format!(
+                "[{}]",
+                vector(1, 0.5)
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ),
+        (1, "normal", "Blog matched", query_vector()),
+        (2, "fallback", "Obsolete instructions", query_vector()),
+    ] {
+        db.client.execute("INSERT INTO notes_rag.blog_chunks(post_id,ordinal,rag_priority,content,token_count,embedding) VALUES(1,$1,$2,$3,10,$4::text::public.vector)",&[&ordinal,&priority,&content,&literal]).await.unwrap();
+    }
+    let mode = Arc::new(AtomicUsize::new(0));
+    let m = mode.clone();
+    let app=axum::Router::new().route("/catalog",get(move ||{let mode=m.clone();async move {let state=mode.load(Ordering::SeqCst);Json(json!({"schema_version":1,"revision":"c".repeat(64),"posts":if state==2{vec![]}else{vec![json!({"id":1,"title":"Synthetic blog","url":"https://cola16.app/synthetic/","published":"2026-01-01","modified":"2026-01-02","revision":if state==0{"a".repeat(64)}else{"b".repeat(64)}})]}}))}}));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = notes_rag_rs::blog::Store::new(
+        notes_rag_rs::blog::Source::new(&endpoint).unwrap(),
+        Database::from_dsn(&db.url).unwrap(),
+        "config".into(),
+    );
+    let (rows, count) = store.search(&query_vector(), 5, 0.35, true).await.unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source_kind"], "wordpress");
+    let excerpt = rows[0]["content"].as_str().unwrap();
+    assert!(excerpt.contains("Blog before"));
+    assert!(excerpt.contains("Blog matched"));
+    assert!(!excerpt.contains("Obsolete"));
+    assert!(store.chunk(&"f".repeat(64), 1).await.unwrap().is_some());
+    mode.store(1, Ordering::SeqCst);
+    let (rows, count) = store.search(&query_vector(), 5, 0.35, true).await.unwrap();
+    assert!(rows.is_empty());
+    assert_eq!(count, 0);
+    assert!(store.chunk(&"f".repeat(64), 1).await.unwrap().is_none());
+    mode.store(2, Ordering::SeqCst);
+    assert!(
+        store
+            .search(&query_vector(), 5, 0.35, true)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    let count: i64 = db
+        .client
+        .query_one("SELECT count(*) FROM notes_rag.pages", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0, "blog source never inserts fake notebook rows");
+    server.abort();
+    drop(store);
+    db.drop().await;
+}

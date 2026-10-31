@@ -67,6 +67,7 @@ pub fn method_not_allowed(allow: &'static str) -> Response {
 
 /// The `headers` middleware from `create_app`, applied to every response.
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let blog_preview = request.uri().path() == "/read-blog";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     for (name, value) in [
@@ -80,6 +81,9 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         (header::CONTENT_SECURITY_POLICY, CSP),
     ] {
         headers.insert(name, HeaderValue::from_static(value));
+    }
+    if blog_preview {
+        headers.insert(header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'none'; script-src 'self' https://apps.cola16.app; style-src 'self'; connect-src 'self' https://apps.cola16.app; img-src 'self' https://cola16.app; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     }
     response
 }

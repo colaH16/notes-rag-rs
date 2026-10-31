@@ -1062,3 +1062,69 @@ async fn reader_no_asset_fd_leak() {
     // Other tests run concurrently in this process; allow small jitter.
     assert!(std::fs::read_dir("/proc/self/fd").unwrap().count() <= before + 8);
 }
+
+#[tokio::test]
+async fn wordpress_preview_and_cached_excerpts_recheck_public_revisions() {
+    use axum::Json;
+    use axum::routing::get as route_get;
+    use std::sync::Mutex;
+    notes_rag_rs::install_crypto_provider();
+    let public = Arc::new(Mutex::new(true));
+    let catalog_public = public.clone();
+    let post_public = public.clone();
+    let post = json!({"id":1,"title":"Synthetic blog","url":"https://cola16.app/synthetic/","published":"2026-01-01","modified":"2026-01-02","revision":"a".repeat(64)});
+    let cpost = post.clone();
+    let mut doc = post.clone();
+    doc["markdown"] =
+        "# Synthetic\n\n![image](/wp-content/uploads/synthetic.png)\n<script>bad()</script>".into();
+    let upstream=axum::Router::new().route("/catalog",route_get(move ||{let public=catalog_public.clone();let post=cpost.clone();async move {Json(json!({"schema_version":1,"revision":"c".repeat(64),"posts":if *public.lock().unwrap(){vec![post]}else{vec![]}}))}}))
+        .route("/posts/1",route_get(move ||{let public=post_public.clone();let doc=doc.clone();async move {if *public.lock().unwrap(){(StatusCode::OK,Json(doc))}else{(StatusCode::NOT_FOUND,Json(json!({"error":"not found"})))}}}));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let fixture = Fixture::new();
+    *fixture.gateway.search_result.lock().unwrap() = Some(
+        json!({"index":{"indexed_pages":1},"results":[{"title":"Synthetic blog","content":"Previously public evidence","source_url":"https://cola16.app/synthetic/","source_kind":"wordpress","post_id":1,"source_revision":"a".repeat(64),"rag_priority":"normal"}]}),
+    );
+    let mut app = WebApp::new(
+        fixture.state.clone(),
+        fixture.gateway.clone(),
+        None,
+        None,
+        None,
+        None,
+        PREFIX.into(),
+        NOTE_PREFIX.into(),
+    )
+    .unwrap();
+    app.blog = Some(notes_rag_rs::blog::Source::new(&base).unwrap());
+    let app = router(Arc::new(app));
+    let response = post_json(&app, "/api/search", &json!({"query":"synthetic"}), &[]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["results"].as_array().unwrap().len(), 1);
+    let response = get(&app, "/read-blog?id=1", &[]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(
+        response
+            .header("content-security-policy")
+            .unwrap()
+            .contains("img-src 'self' https://cola16.app")
+    );
+    assert!(response.text().contains("WordPress에서 전문 보기"));
+    assert!(!response.text().contains("<script>bad()"));
+    *public.lock().unwrap() = false;
+    let response = post_json(&app, "/api/search", &json!({"query":"synthetic"}), &[]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["cached"], true);
+    assert!(response.json()["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fixture.gateway.searches(),
+        1,
+        "revoked result filtered without a paid query"
+    );
+    assert_eq!(
+        get(&app, "/read-blog?id=1", &[]).await.status,
+        StatusCode::NOT_FOUND
+    );
+    task.abort();
+}
