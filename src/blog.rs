@@ -7,7 +7,7 @@ use crate::search::store::db;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio_postgres::types::Type;
 
@@ -34,6 +34,94 @@ pub fn valid_url(v: &str) -> bool {
         && !v.chars().any(char::is_control)
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+}
+pub fn valid_category_path(path: &[Category]) -> bool {
+    let mut seen = BTreeSet::new();
+    path.len() <= 32
+        && path.iter().all(|c| {
+            c.id > 0
+                && !c.name.trim().is_empty()
+                && c.name.len() <= 1024
+                && !c.name.chars().any(char::is_control)
+                && seen.insert(c.id)
+        })
+}
+fn normalize_category_paths(posts: &mut BTreeMap<i64, Post>) {
+    let mut definitions: BTreeMap<i64, (Option<i64>, String)> = BTreeMap::new();
+    let mut conflicting = BTreeSet::new();
+    for post in posts.values_mut() {
+        if !valid_category_path(&post.category_path) {
+            post.category_path.clear();
+        }
+        let mut parent = None;
+        for category in &post.category_path {
+            let definition = (parent, category.name.clone());
+            if definitions
+                .get(&category.id)
+                .is_some_and(|old| *old != definition)
+            {
+                conflicting.insert(category.id);
+            }
+            definitions.entry(category.id).or_insert(definition);
+            parent = Some(category.id);
+        }
+    }
+    let excessive = definitions.len() > 10000;
+    for post in posts.values_mut() {
+        if excessive
+            || post
+                .category_path
+                .iter()
+                .any(|c| conflicting.contains(&c.id))
+        {
+            post.category_path.clear();
+        }
+    }
+}
+fn deserialize_category_path<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Category>, D::Error> {
+    let raw = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<Vec<Category>>(raw)
+        .ok()
+        .filter(|p| valid_category_path(p))
+        .unwrap_or_default())
+}
+/// Malformed classification is isolated from public source availability: that
+/// post stays searchable from All/blog root, without a category assertion.
+pub fn categories(posts: &BTreeMap<i64, Post>) -> Result<Vec<Value>> {
+    let mut posts = posts.clone();
+    normalize_category_paths(&mut posts);
+    let mut counts: BTreeMap<i64, (Option<i64>, String, usize)> = BTreeMap::new();
+    for post in posts.values() {
+        let mut parent = None;
+        for category in &post.category_path {
+            let entry = counts
+                .entry(category.id)
+                .or_insert((parent, category.name.clone(), 0));
+            entry.2 += 1;
+            parent = Some(category.id);
+        }
+    }
+    Ok(counts.into_iter().map(|(id,(parent,name,posts))|json!({"id":id,"parent":parent,"name":name,"posts":posts})).collect())
+}
+pub fn in_category(post: &Post, category: Option<i64>) -> bool {
+    category.is_none_or(|id| post.category_path.iter().any(|c| c.id == id))
+}
+pub fn catalog_revision(posts: &BTreeMap<i64, Post>) -> String {
+    let paths = posts
+        .iter()
+        .map(|(id, post)| (*id, &post.category_path))
+        .collect::<BTreeMap<_, _>>();
+    crate::py::sha256_hex(
+        serde_json::to_string(&paths).expect("serializable public category metadata"),
+    )
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Post {
     pub id: i64,
     pub title: String,
@@ -41,6 +129,8 @@ pub struct Post {
     pub published: String,
     pub modified: String,
     pub revision: String,
+    #[serde(default, deserialize_with = "deserialize_category_path")]
+    pub category_path: Vec<Category>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub markdown: Option<String>,
 }
@@ -148,6 +238,7 @@ impl Source {
                 return Err(error());
             }
         }
+        normalize_category_paths(&mut out);
         Ok(out)
     }
     pub async fn post(&self, id: i64) -> Result<Post> {
@@ -212,6 +303,18 @@ impl Store {
         history: bool,
     ) -> Result<(Vec<Value>, usize)> {
         let catalog = self.source.catalog().await?;
+        self.search_catalog(literal, limit, minimum, history, None, &catalog)
+            .await
+    }
+    pub async fn search_catalog(
+        &self,
+        literal: &str,
+        limit: i64,
+        minimum: f64,
+        history: bool,
+        category: Option<i64>,
+        catalog: &BTreeMap<i64, Post>,
+    ) -> Result<(Vec<Value>, usize)> {
         let client = self.database.connect().await?;
         client.batch_execute("BEGIN; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'").await.map_err(db)?;
         let generation = client
@@ -235,7 +338,9 @@ impl Store {
                 catalog
                     .get(&id)
                     .filter(|p| {
-                        p.revision == r.get::<_, String>(1) && p.url == r.get::<_, String>(2)
+                        p.revision == r.get::<_, String>(1)
+                            && p.url == r.get::<_, String>(2)
+                            && in_category(p, category)
                     })
                     .map(|_| id)
             })
@@ -272,7 +377,7 @@ impl Store {
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
             let context = json!({"matched_ordinal":ordinal,"included_ordinals":parts.keys().copied().collect::<Vec<_>>(),"omitted_ordinals":neighbors.iter().map(|n|n.get::<_,i32>(0)).filter(|n|!parts.contains_key(n)).collect::<Vec<_>>(),"expanded":parts.len()>1,"character_limit":6000});
-            results.push(json!({"page_key":row.get::<_,String>("page_key"),"ordinal":ordinal,"title":row.get::<_,String>("title"),"status":"current","rag_priority":priority,"needs_visual_review":row.get::<_,bool>("needs_visual_review"),"source_url":row.get::<_,String>("url"),"source_kind":"wordpress","post_id":id,"source_revision":row.get::<_,String>("revision"),"published":row.get::<_,String>("published"),"modified":row.get::<_,String>("modified"),"content":text::prefix(&content,6000),"truncated":text::len(&content)>6000 || neighbors.len()>parts.len(),"similarity":row.get::<_,f64>("similarity"),"context":context,"evidence_only":true}));
+            results.push(json!({"page_key":row.get::<_,String>("page_key"),"ordinal":ordinal,"title":row.get::<_,String>("title"),"status":"current","rag_priority":priority,"needs_visual_review":row.get::<_,bool>("needs_visual_review"),"source_url":row.get::<_,String>("url"),"source_kind":"wordpress","post_id":id,"source_revision":row.get::<_,String>("revision"),"category_path":catalog[&id].category_path,"published":row.get::<_,String>("published"),"modified":row.get::<_,String>("modified"),"content":text::prefix(&content,6000),"truncated":text::len(&content)>6000 || neighbors.len()>parts.len(),"similarity":row.get::<_,f64>("similarity"),"context":context,"evidence_only":true}));
         }
         client.batch_execute("COMMIT").await.map_err(db)?;
         Ok((results, ids.len()))
@@ -456,7 +561,7 @@ mod tests {
     }
     #[test]
     fn preview_sanitizes_and_keeps_own_images() {
-        let p=Post{id:1,title:"<script>x</script>{{SAFE}}".into(),url:"https://cola16.app/post/".into(),published:"2026-01-01".into(),modified:"2026-01-02".into(),revision:"a".repeat(64),markdown:Some("# Hi\n\n![own](/wp-content/uploads/a.png)\n![tracker](https://evil.test/a.png)\n<script>alert(1)</script>\n[a](javascript:alert(2))".into())};
+        let p=Post{id:1,title:"<script>x</script>{{SAFE}}".into(),url:"https://cola16.app/post/".into(),published:"2026-01-01".into(),modified:"2026-01-02".into(),revision:"a".repeat(64),category_path:vec![],markdown:Some("# Hi\n\n![own](/wp-content/uploads/a.png)\n![tracker](https://evil.test/a.png)\n<script>alert(1)</script>\n[a](javascript:alert(2))".into())};
         let s = render_page(&p);
         assert!(s.contains("https://cola16.app/wp-content/uploads/a.png"));
         assert!(!s.contains("src=\"https://evil"));
@@ -474,6 +579,7 @@ mod tests {
             published: "x".into(),
             modified: "x".into(),
             revision: "a".repeat(64),
+            category_path: vec![],
             markdown: None,
         };
         let c = BTreeMap::from([(1, p)]);
@@ -483,5 +589,86 @@ mod tests {
         let mut r = r;
         r["source_revision"] = "b".repeat(64).into();
         assert!(!visible(&r, &c));
+    }
+    #[test]
+    fn primary_category_ancestors_count_once_and_metadata_changes_epoch() {
+        let mut post: Post = serde_json::from_value(json!({"id":1,"title":"Synthetic","url":"https://cola16.app/a/","published":"x","modified":"x","revision":"a".repeat(64),"category_path":[{"id":10,"name":"Root"},{"id":11,"name":"Leaf"}]})).unwrap();
+        let mut catalog = BTreeMap::from([(1, post.clone())]);
+        assert!(post.valid());
+        assert!(in_category(&post, Some(10)) && in_category(&post, Some(11)));
+        assert!(!in_category(&post, Some(12)));
+        assert_eq!(
+            categories(&catalog).unwrap(),
+            vec![
+                json!({"id":10,"parent":null,"name":"Root","posts":1}),
+                json!({"id":11,"parent":10,"name":"Leaf","posts":1})
+            ]
+        );
+        let before = catalog_revision(&catalog);
+        post.title = "Edited title".into();
+        post.revision = "b".repeat(64);
+        catalog.insert(1, post.clone());
+        assert_eq!(before, catalog_revision(&catalog));
+        post.revision = "a".repeat(64);
+        post.category_path = vec![Category {
+            id: 12,
+            name: "Other".into(),
+        }];
+        catalog.insert(1, post.clone());
+        assert_ne!(before, catalog_revision(&catalog));
+        assert_eq!(post.revision, "a".repeat(64));
+        post.category_path.push(Category {
+            id: 12,
+            name: "Duplicate".into(),
+        });
+        assert!(!valid_category_path(&post.category_path));
+    }
+    #[test]
+    fn malformed_and_conflicting_categories_do_not_hide_posts_or_good_categories() {
+        let base = json!({"id":1,"title":"Synthetic","url":"https://cola16.app/a/","published":"x","modified":"x","revision":"a".repeat(64)});
+        let mut catalog = BTreeMap::new();
+        for (id, path) in [
+            (1, json!([{"id":10,"name":"Good"}])),
+            (
+                2,
+                json!([{"id":20,"name":"Bad"},{"id":20,"name":"Duplicate"}]),
+            ),
+            (3, json!({"wrong":"shape"})),
+            (4, json!([{"id":30,"name":"A"}])),
+            (5, json!([{"id":30,"name":"B"}])),
+        ] {
+            let mut raw = base.clone();
+            raw["id"] = id.into();
+            raw["category_path"] = path;
+            let post: Post = serde_json::from_value(raw).unwrap();
+            assert!(post.valid());
+            catalog.insert(id, post);
+        }
+        normalize_category_paths(&mut catalog);
+        assert_eq!(catalog.len(), 5);
+        assert_eq!(
+            categories(&catalog).unwrap(),
+            vec![json!({"id":10,"parent":null,"name":"Good","posts":1})]
+        );
+        assert!(catalog[&2].category_path.is_empty() && catalog[&3].category_path.is_empty());
+        assert!(catalog[&4].category_path.is_empty() && catalog[&5].category_path.is_empty());
+    }
+    #[test]
+    fn new_primary_terms_are_discovered_without_a_static_category_allowlist() {
+        let first:Post=serde_json::from_value(json!({"id":1,"title":"Synthetic","url":"https://cola16.app/a/","published":"x","modified":"x","revision":"a".repeat(64),"category_path":[{"id":10,"name":"Root"},{"id":11,"name":"Existing"}]})).unwrap();
+        let mut catalog = BTreeMap::from([(1, first.clone())]);
+        let before = catalog_revision(&catalog);
+        let mut new = first;
+        new.id = 2;
+        new.category_path.push(Category {
+            id: 99999,
+            name: "New child".into(),
+        });
+        catalog.insert(2, new);
+        let groups = categories(&catalog).unwrap();
+        assert!(groups.contains(&json!({"id":99999,"parent":11,"name":"New child","posts":1})));
+        assert!(groups.contains(&json!({"id":10,"parent":null,"name":"Root","posts":2})));
+        assert_ne!(before, catalog_revision(&catalog));
+        assert!(in_category(&catalog[&2], Some(10)) && in_category(&catalog[&2], Some(99999)));
     }
 }

@@ -110,6 +110,54 @@ impl Retrieval for SearchService {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceScope {
+    #[default]
+    All,
+    Notes,
+    WordPress,
+}
+impl SourceScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Notes => "notes",
+            Self::WordPress => "wordpress",
+        }
+    }
+}
+pub fn scope_arguments(
+    arguments: &Map<String, Value>,
+    folder: &str,
+) -> Result<(SourceScope, Option<i64>)> {
+    let source = match arguments.get("source") {
+        None => SourceScope::All,
+        Some(Value::String(s)) if s == "all" => SourceScope::All,
+        Some(Value::String(s)) if s == "notes" => SourceScope::Notes,
+        Some(Value::String(s)) if s == "wordpress" => SourceScope::WordPress,
+        _ => return Err(Fault::Value("Invalid source scope")),
+    };
+    let category = match arguments.get("blog_category") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_i64()
+                .filter(|id| *id > 0)
+                .ok_or(Fault::Value("Invalid blog category"))?,
+        ),
+    };
+    validate_source_scope(source, category, folder)?;
+    Ok((source, category))
+}
+fn validate_source_scope(source: SourceScope, category: Option<i64>, folder: &str) -> Result<()> {
+    if (source == SourceScope::WordPress && !folder.is_empty())
+        || (category.is_some() && source != SourceScope::WordPress)
+        || category.is_some_and(|id| id <= 0)
+    {
+        return Err(Fault::Value("Incompatible source scope"));
+    }
+    Ok(())
+}
+
 /// Validated `search_notes` arguments (after the MCP argument layer).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchRequest {
@@ -118,6 +166,8 @@ pub struct SearchRequest {
     pub include_history: bool,
     pub min_similarity: f64,
     pub folder: String,
+    pub source: SourceScope,
+    pub blog_category: Option<i64>,
 }
 
 impl SearchService {
@@ -217,6 +267,8 @@ impl SearchService {
         if crate::scope::validate_folder(&request.folder).is_err() {
             return Err(Fault::search("Invalid folder scope."));
         }
+        validate_source_scope(request.source, request.blog_category, &request.folder)
+            .map_err(|_| Fault::search("Invalid source/category scope."))?;
         let stripped = crate::py::text::strip(&request.query);
         if stripped.is_empty()
             || crate::py::text::len(&request.query) > 4000
@@ -232,55 +284,62 @@ impl SearchService {
             if (this.count)(&text).map_err(|_| Fault::Other("tokenizer failure"))? > 2048 {
                 return Err(Fault::search("Query exceeds 2048 tokens."));
             }
-            let info = this.store.check(&request.folder).await?;
-            if !request.folder.is_empty() && info.scoped_pages == 0 {
-                return Err(Fault::search(
-                    "Folder is not in the current index. Refresh the folder list.",
-                ));
+            let blog_only = request.source == SourceScope::WordPress;
+            let mut info = if blog_only {
+                json!({"indexed_pages":0,"scoped_pages":0,"folder":"","access_revision":this.store.access_revision})
+                    .as_object().cloned().expect("index object")
+            } else {
+                let info = this.store.check(&request.folder).await?;
+                if !request.folder.is_empty() && info.scoped_pages == 0 {
+                    return Err(Fault::search("Folder is not in the current index. Refresh the folder list."));
+                }
+                info.to_json()
+            };
+            let include_blog = request.folder.is_empty() && request.source != SourceScope::Notes;
+            let mut blog_unavailable = false;
+            let mut catalog = if include_blog {
+                match &this.blog {
+                    Some(blog) => match blog.source.catalog().await {
+                        Ok(catalog) => Some(catalog),
+                        Err(_) => { blog_unavailable = true; None }
+                    },
+                    None => { blog_unavailable = request.source == SourceScope::WordPress; None }
+                }
+            } else { None };
+            if blog_only && catalog.is_some()
+                && let Some(blog) = &this.blog
+                && !blog.revision().await.ok().is_some_and(|r| crate::blog::valid_revision(&r)) {
+                catalog = None;
+                blog_unavailable = true;
+            }
+            if let (Some(id), Some(catalog)) = (request.blog_category, catalog.as_ref())
+                && !catalog.values().any(|post| crate::blog::in_category(post, Some(id))) {
+                return Err(Fault::search("Blog category is not in the current catalog. Refresh the category list."));
+            }
+            // A WordPress outage/empty scope must not spend on a query vector.
+            if blog_only && catalog.as_ref().is_none_or(|c| c.is_empty()) {
+                let mut response = json!({"index":info,"results":[],"policy":POLICY,"min_similarity":request.min_similarity});
+                if blog_unavailable { response["blog_unavailable"] = true.into(); }
+                return Ok(response);
             }
             let vector = this.embedder.embed_one(text.clone()).await?;
             let literal = vector_literal(&vector);
-            let (mut rows, info) = this
-                .store
-                .search(
-                    &literal,
-                    request.limit,
-                    request.min_similarity,
-                    request.include_history,
-                    &request.folder,
-                )
-                .await?;
-            if let Some(visible) = this
-                .visible(rows.iter().map(|r| r.relative_path.clone()).collect())
-                .await?
-            {
-                rows.retain(|row| visible.contains(&row.relative_path));
+            let mut rows = Vec::new();
+            let mut results = Vec::new();
+            if !blog_only {
+                let (note_rows, note_info) = this.store.search(&literal, request.limit,
+                    request.min_similarity, request.include_history, &request.folder).await?;
+                rows = note_rows;
+                info = note_info;
+                if let Some(visible) = this.visible(rows.iter().map(|r| r.relative_path.clone()).collect()).await? {
+                    rows.retain(|row| visible.contains(&row.relative_path));
+                }
+                results = rows.iter().map(|row| result_item(row, &this.base_url, &this.root,
+                    super::context::CONTEXT_CHARACTERS)).collect::<Result<Vec<_>>>()?;
             }
-            let mut results = rows
-                .iter()
-                .map(|row| {
-                    result_item(
-                        row,
-                        &this.base_url,
-                        &this.root,
-                        super::context::CONTEXT_CHARACTERS,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mut info = info;
-            let mut blog_unavailable = false;
-            if request.folder.is_empty()
-                && let Some(blog) = &this.blog
-            {
-                match blog
-                    .search(
-                        &literal,
-                        request.limit,
-                        request.min_similarity,
-                        request.include_history,
-                    )
-                    .await
-                {
+            if let (Some(blog), Some(catalog)) = (&this.blog, catalog.as_ref()) {
+                match blog.search_catalog(&literal, request.limit, request.min_similarity,
+                    request.include_history, request.blog_category, catalog).await {
                     Ok((hits, count)) => {
                         for key in ["indexed_pages", "scoped_pages"] {
                             let n = info.get(key).and_then(Value::as_i64).unwrap_or(0);
@@ -315,11 +374,33 @@ impl SearchService {
         self.bounded(|state| async move {
             let mut folders = state.store.folders().await?;
             if let Some(blog) = &state.blog {
-                folders["blog_index_revision"] = blog
-                    .revision()
-                    .await
-                    .unwrap_or_else(|_| "unavailable".into())
-                    .into();
+                let revision = blog.revision().await;
+                let catalog = if revision
+                    .as_ref()
+                    .is_ok_and(|r| crate::blog::valid_revision(r))
+                {
+                    blog.source.catalog().await
+                } else {
+                    Err(Fault::Other("blog index unavailable"))
+                };
+                match catalog {
+                    Ok(catalog) => {
+                        folders["blog_index_revision"] = crate::py::sha256_hex(format!(
+                            "{}:{}",
+                            revision.as_ref().expect("validated blog generation"),
+                            crate::blog::catalog_revision(&catalog)
+                        ))
+                        .into();
+                        folders["blog_posts"] = catalog.len().into();
+                        folders["blog_categories"] = crate::blog::categories(&catalog)?.into();
+                    }
+                    Err(_) => {
+                        folders["blog_index_revision"] = "unavailable".into();
+                        folders["blog_posts"] = 0.into();
+                        folders["blog_categories"] = json!([]);
+                        folders["blog_unavailable"] = true.into();
+                    }
+                }
             }
             Ok(folders)
         })

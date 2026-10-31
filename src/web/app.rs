@@ -16,13 +16,14 @@ use crate::graph::visible_graph;
 use crate::py::{json as pyjson, sha256_hex, text, url};
 use crate::reader::Reader;
 use crate::scope;
+use crate::search::service::{SourceScope, scope_arguments};
 use ::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::body::Body;
 use axum::extract::Request;
 use axum::response::Response;
 use http_body_util::{BodyExt, Limited};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -164,13 +165,22 @@ impl WebApp {
     }
 
     /// Recheck both filesystem ACLs and live WordPress revisions on cache hits.
-    async fn visible_result(&self, result: Value, audience: Audience) -> Result<Value> {
+    async fn visible_result(
+        &self,
+        result: Value,
+        audience: Audience,
+        source: SourceScope,
+        category: Option<i64>,
+    ) -> Result<Value> {
         let rows = result
             .get("results")
             .and_then(Value::as_array)
             .ok_or(Fault::Other("malformed result"))?;
         let mut paths = HashMap::new();
-        for row in rows.iter().filter(|r| !crate::blog::is_blog(r)) {
+        for row in rows
+            .iter()
+            .filter(|r| source != SourceScope::WordPress && !crate::blog::is_blog(r))
+        {
             let link = row["url"]
                 .as_str()
                 .ok_or(Fault::Other("malformed result"))?;
@@ -184,7 +194,7 @@ impl WebApp {
                 .unwrap_or(&path);
             paths.insert(link.to_string(), format!("{relative}.md"));
         }
-        let visible = if self.reader.is_some() {
+        let visible = if self.reader.is_some() && source != SourceScope::WordPress {
             Some(
                 self.visible(
                     paths.values().cloned().collect(),
@@ -196,7 +206,7 @@ impl WebApp {
             None
         };
         let mut failed = false;
-        let catalog = if rows.iter().any(crate::blog::is_blog) {
+        let catalog = if source != SourceScope::Notes && rows.iter().any(crate::blog::is_blog) {
             match &self.blog {
                 Some(source) => match source.catalog().await {
                     Ok(c) => c,
@@ -217,7 +227,15 @@ impl WebApp {
             .iter()
             .filter(|row| {
                 if crate::blog::is_blog(row) {
-                    return crate::blog::visible(row, &catalog);
+                    return source != SourceScope::Notes
+                        && crate::blog::visible(row, &catalog)
+                        && row["post_id"]
+                            .as_i64()
+                            .and_then(|id| catalog.get(&id))
+                            .is_some_and(|p| crate::blog::in_category(p, category));
+                }
+                if source == SourceScope::WordPress {
+                    return false;
                 }
                 visible.as_ref().is_none_or(|set| {
                     row["url"]
@@ -226,7 +244,16 @@ impl WebApp {
                         .is_some_and(|p| set.contains(p))
                 })
             })
-            .cloned()
+            .map(|row| {
+                let mut row = row.clone();
+                if crate::blog::is_blog(&row)
+                    && let Some(post) = row["post_id"].as_i64().and_then(|id| catalog.get(&id))
+                {
+                    row["category_path"] =
+                        serde_json::to_value(&post.category_path).expect("public path");
+                }
+                row
+            })
             .collect();
         let mut result = result.as_object().cloned().unwrap_or_default();
         result.insert("results".into(), kept.into());
@@ -429,7 +456,14 @@ impl WebApp {
         let raw = raw.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(&raw);
         let data: Value = serde_json::from_slice(raw).map_err(|_| Fault::Value("invalid JSON"))?;
         let data = data.as_object().ok_or(Fault::Value("Invalid arguments"))?;
-        let allowed: HashSet<&str> = ["query", "include_history", "folder"].into();
+        let allowed: HashSet<&str> = [
+            "query",
+            "include_history",
+            "folder",
+            "source",
+            "blog_category",
+        ]
+        .into();
         if data.keys().any(|k| !allowed.contains(k.as_str())) {
             return Err(Fault::Value("Invalid arguments"));
         }
@@ -449,6 +483,28 @@ impl WebApp {
             return Err(Fault::Value("Invalid query"));
         };
         let query = text::normalize_whitespace(&query);
+        let (source, category) = scope_arguments(data, &folder)?;
+        if let Some(category) = category {
+            let listing = self.catalog(&selected).await?;
+            if listing.get("blog_unavailable").and_then(Value::as_bool) == Some(true) {
+                return Ok(http::error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "블로그 분류를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                    None,
+                ));
+            }
+            if !listing
+                .get("blog_categories")
+                .and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().any(|row| row["id"].as_i64() == Some(category)))
+            {
+                return Ok(http::error(
+                    StatusCode::BAD_REQUEST,
+                    "검색할 수 없는 블로그 분류입니다. 목록을 새로고침해 주세요.",
+                    None,
+                ));
+            }
+        }
         if !folder.is_empty() {
             let listing = self.catalog(&selected).await?;
             let known = listing["folders"]
@@ -462,19 +518,20 @@ impl WebApp {
                 ));
             }
         }
-        let blog_revision = if self.blog.is_some() && folder.is_empty() {
-            match tokio::time::timeout(Duration::from_secs(2), self.catalog(&selected)).await {
-                Ok(Ok(catalog)) => catalog.get("blog_index_revision").cloned(),
-                _ => self
-                    .catalogs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&audience)
-                    .and_then(|(catalog, _)| catalog.get("blog_index_revision").cloned()),
-            }
-        } else {
-            None
-        };
+        let blog_revision =
+            if self.blog.is_some() && folder.is_empty() && source != SourceScope::Notes {
+                match tokio::time::timeout(Duration::from_secs(2), self.catalog(&selected)).await {
+                    Ok(Ok(catalog)) => catalog.get("blog_index_revision").cloned(),
+                    _ => self
+                        .catalogs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&audience)
+                        .and_then(|(catalog, _)| catalog.get("blog_index_revision").cloned()),
+                }
+            } else {
+                None
+            };
         let key_material = json!([
             self.cache_version,
             audience.name(),
@@ -484,7 +541,15 @@ impl WebApp {
             folder,
         ]);
         let key_material = if self.blog.is_some() {
-            json!([key_material, blog_revision])
+            json!([
+                key_material,
+                blog_revision,
+                "wordpress-scopes-v2",
+                source.as_str(),
+                category
+            ])
+        } else if source != SourceScope::All || category.is_some() {
+            json!([key_material, source.as_str(), category])
         } else {
             key_material
         };
@@ -492,7 +557,9 @@ impl WebApp {
         let state = self.state.clone();
         let lookup = key.clone();
         if let Some(cached) = self.blocking(move || state.cached(&lookup)).await? {
-            let cached = self.visible_result(cached, audience).await?;
+            let cached = self
+                .visible_result(cached, audience, source, category)
+                .await?;
             if !self.still(&headers, audience) {
                 return Ok(http::error(StatusCode::CONFLICT, MSG_SESSION_CHANGED, None));
             }
@@ -510,9 +577,13 @@ impl WebApp {
         let fresh: Result<Value> = async {
             let result = tokio::time::timeout(
                 Duration::from_secs(45),
-                selected
-                    .gateway
-                    .search(query.clone(), history, folder.clone()),
+                selected.gateway.search_scoped(
+                    query.clone(),
+                    history,
+                    folder.clone(),
+                    source,
+                    category,
+                ),
             )
             .await
             .map_err(|_| Fault::Os)??;
@@ -528,7 +599,8 @@ impl WebApp {
             let mut result =
                 public_result(&result, &folder, &self.citation_prefix, &self.note_prefix)?;
             result.insert("audience".into(), audience.name().into());
-            self.visible_result(Value::Object(result), audience).await
+            self.visible_result(Value::Object(result), audience, source, category)
+                .await
         }
         .await;
         let Ok(result) = fresh else {
@@ -544,7 +616,16 @@ impl WebApp {
         }
         let state = self.state.clone();
         let saved = result.clone();
-        if result.get("blog_unavailable").and_then(Value::as_bool) != Some(true) {
+        let stable_blog_epoch = self.blog.is_none()
+            || source == SourceScope::Notes
+            || !folder.is_empty()
+            || blog_revision
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(crate::blog::valid_revision);
+        if result.get("blog_unavailable").and_then(Value::as_bool) != Some(true)
+            && stable_blog_epoch
+        {
             self.blocking(move || state.save(&key, &saved)).await?;
         }
         Ok(http::json(StatusCode::OK, &with_flag(result, false)))
@@ -920,7 +1001,12 @@ pub fn public_result(
         let content = pyjson::to_str(row.get("content").ok_or(Fault::Other("missing content"))?);
         let mut item = Map::new();
         item.insert("title".into(), text::prefix(&title, 400).into());
-        item.insert("excerpt".into(), text::prefix(&content, 6000).into());
+        let display = if blog {
+            crate::blog_excerpt::excerpt(&content)
+        } else {
+            content
+        };
+        item.insert("excerpt".into(), text::prefix(&display, 6000).into());
         item.insert("url".into(), link.into());
         if blog {
             for key in [
@@ -934,6 +1020,19 @@ pub fn public_result(
                     item.insert(key.into(), value.clone());
                 }
             }
+            let path: Vec<crate::blog::Category> = serde_json::from_value(
+                row.get("category_path")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .map_err(|_| Fault::Value("Invalid blog category path"))?;
+            if !crate::blog::valid_category_path(&path) {
+                return Err(Fault::Value("Invalid blog category path"));
+            }
+            item.insert(
+                "category_path".into(),
+                serde_json::to_value(path).expect("public category path"),
+            );
         }
         item.insert(
             "history".into(),
@@ -1017,6 +1116,89 @@ pub fn public_folders(result: &Map<String, Value>) -> Result<Map<String, Value>>
     {
         out.insert("blog_index_revision".into(), revision.into());
     }
+    if result.contains_key("blog_posts") || result.contains_key("blog_categories") {
+        let validated = (|| -> Result<(i64, Vec<Value>)> {
+            let posts = result
+                .get("blog_posts")
+                .and_then(Value::as_i64)
+                .filter(|n| (0..=10000).contains(n))
+                .ok_or(Fault::Value("Invalid blog count"))?;
+            let rows = result
+                .get("blog_categories")
+                .and_then(Value::as_array)
+                .filter(|r| r.len() <= 10000)
+                .ok_or(Fault::Value("Invalid blog categories"))?;
+            let mut categories = BTreeMap::new();
+            for row in rows {
+                let id = row["id"]
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .ok_or(Fault::Value("Invalid blog category"))?;
+                let parent = match row.get("parent") {
+                    Some(Value::Null) => None,
+                    Some(v) => Some(
+                        v.as_i64()
+                            .filter(|p| *p > 0 && *p != id)
+                            .ok_or(Fault::Value("Invalid category parent"))?,
+                    ),
+                    None => return Err(Fault::Value("Missing category parent")),
+                };
+                let name = row["name"]
+                    .as_str()
+                    .filter(|s| {
+                        !s.trim().is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control)
+                    })
+                    .ok_or(Fault::Value("Invalid category name"))?;
+                let count = row["posts"]
+                    .as_i64()
+                    .filter(|n| (1..=posts).contains(n))
+                    .ok_or(Fault::Value("Invalid category count"))?;
+                if categories
+                    .insert(
+                        id,
+                        json!({"id":id,"parent":parent,"name":name,"posts":count}),
+                    )
+                    .is_some()
+                {
+                    return Err(Fault::Value("Duplicate category"));
+                }
+            }
+            for (&id, row) in &categories {
+                let mut seen = BTreeSet::from([id]);
+                let mut next = row["parent"].as_i64();
+                let mut count = row["posts"].as_i64().unwrap_or(0);
+                while let Some(parent) = next {
+                    let node = categories
+                        .get(&parent)
+                        .ok_or(Fault::Value("Orphan category"))?;
+                    if !seen.insert(parent)
+                        || seen.len() > 32
+                        || node["posts"].as_i64().unwrap_or(0) < count
+                    {
+                        return Err(Fault::Value("Invalid category hierarchy"));
+                    }
+                    count = node["posts"].as_i64().unwrap_or(0);
+                    next = node["parent"].as_i64();
+                }
+            }
+            Ok((posts, categories.into_values().collect::<Vec<_>>()))
+        })();
+        match validated {
+            Ok((posts, categories)) => {
+                out.insert("blog_posts".into(), posts.into());
+                out.insert("blog_categories".into(), categories.into());
+            }
+            Err(_) => {
+                // Blog metadata cannot make the independent note folder catalog fail.
+                out.insert("blog_posts".into(), 0.into());
+                out.insert("blog_categories".into(), json!([]));
+                out.insert("blog_unavailable".into(), true.into());
+            }
+        }
+    }
+    if result.get("blog_unavailable").and_then(Value::as_bool) == Some(true) {
+        out.insert("blog_unavailable".into(), true.into());
+    }
     Ok(out)
 }
 
@@ -1074,5 +1256,52 @@ mod tests {
                 "{input}"
             );
         }
+    }
+    #[test]
+    fn category_catalog_rejects_cycles_orphans_duplicates_and_bad_counts() {
+        let root = json!({"id":1,"parent":null,"name":"Root","posts":2});
+        let leaf = json!({"id":2,"parent":1,"name":"Leaf","posts":1});
+        let valid = json!({"folders":[],"indexed_pages":0,"blog_posts":2,"blog_categories":[root.clone(),leaf.clone()]});
+        assert!(public_folders(valid.as_object().unwrap()).is_ok());
+        for categories in [
+            json!([root.clone(), root.clone()]),
+            json!([leaf.clone()]),
+            json!([{"id":1,"parent":2,"name":"A","posts":1},{"id":2,"parent":1,"name":"B","posts":1}]),
+            json!([{"id":1,"parent":null,"name":"A","posts":3}]),
+            json!([{"id":true,"parent":null,"name":"A","posts":1}]),
+        ] {
+            let data =
+                json!({"folders":[],"indexed_pages":0,"blog_posts":2,"blog_categories":categories});
+            let safe = public_folders(data.as_object().unwrap()).unwrap();
+            assert_eq!(safe["blog_unavailable"], true, "{data}");
+            assert_eq!(safe["folders"], json!([]));
+        }
+    }
+    #[test]
+    fn only_blog_display_excerpt_is_projected_and_evidence_stays_raw() {
+        let mut row = json!({"title":"Synthetic","source_kind":"wordpress","post_id":1,"source_revision":"a".repeat(64),"source_url":"https://cola16.app/a/","content":"<p>one</p><p>two</p>\n\n`<literal>`"});
+        let evidence = row["content"].clone();
+        let result = json!({"index":{"indexed_pages":1},"results":[row.clone()]});
+        let display = public_result(&result, "", PREFIX, NOTE).unwrap();
+        assert!(
+            display["results"][0]["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("one\ntwo")
+        );
+        assert!(
+            display["results"][0]["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("<literal>")
+        );
+        assert_eq!(result["results"][0]["content"], evidence);
+        row["source_kind"] = "note".into();
+        row["source_url"] = format!("{PREFIX}synthetic").into();
+        let result = json!({"results":[row]});
+        assert_eq!(
+            public_result(&result, "", PREFIX, NOTE).unwrap()["results"][0]["excerpt"],
+            evidence
+        );
     }
 }

@@ -21,6 +21,16 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Upstream seam (Python tests used `AsyncMock`).
 pub trait Upstream: Send + Sync {
     fn search(&self, query: String, history: bool, folder: String) -> BoxFuture<'_, Result<Value>>;
+    fn search_scoped(
+        &self,
+        query: String,
+        history: bool,
+        folder: String,
+        _source: crate::search::service::SourceScope,
+        _category: Option<i64>,
+    ) -> BoxFuture<'_, Result<Value>> {
+        self.search(query, history, folder)
+    }
     fn folders(&self) -> BoxFuture<'_, Result<Value>>;
     fn graph(&self) -> BoxFuture<'_, Result<Value>>;
 }
@@ -91,9 +101,30 @@ impl McpGateway {
 
 impl Upstream for McpGateway {
     fn search(&self, query: String, history: bool, folder: String) -> BoxFuture<'_, Result<Value>> {
+        self.search_scoped(
+            query,
+            history,
+            folder,
+            crate::search::service::SourceScope::All,
+            None,
+        )
+    }
+    fn search_scoped(
+        &self,
+        query: String,
+        history: bool,
+        folder: String,
+        source: crate::search::service::SourceScope,
+        category: Option<i64>,
+    ) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async move {
-            let arguments =
+            let mut arguments =
                 json!({"query": query, "limit": 5, "include_history": history, "folder": folder});
+            // Omit defaults so rolling upgrades remain compatible with the old service.
+            if source != crate::search::service::SourceScope::All || category.is_some() {
+                arguments["source"] = source.as_str().into();
+                arguments["blog_category"] = category.into();
+            }
             self.call(
                 "search_notes",
                 arguments.as_object().cloned().unwrap_or_default(),

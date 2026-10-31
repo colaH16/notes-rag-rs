@@ -51,6 +51,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
 markdown-it = { version = "=0.6.1", default-features = false }
 ammonia = "=4.1.4"
+html5ever = "=0.39.0"
 unicode-ident = "1"
 unicode-general-category = "0.6"
 caseless = "0.2"

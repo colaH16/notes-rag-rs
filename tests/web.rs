@@ -1083,6 +1083,8 @@ async fn wordpress_preview_and_cached_excerpts_recheck_public_revisions() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
     let fixture = Fixture::new();
+    *fixture.gateway.folders_result.lock().unwrap() =
+        Some(json!({"folders":[],"indexed_pages":1,"blog_index_revision":"a".repeat(64)}));
     *fixture.gateway.search_result.lock().unwrap() = Some(
         json!({"index":{"indexed_pages":1},"results":[{"title":"Synthetic blog","content":"Previously public evidence","source_url":"https://cola16.app/synthetic/","source_kind":"wordpress","post_id":1,"source_revision":"a".repeat(64),"rag_priority":"normal"}]}),
     );
@@ -1196,4 +1198,157 @@ async fn blog_index_revision_invalidates_results_without_resetting_usage() {
             .status,
         StatusCode::TOO_MANY_REQUESTS
     );
+}
+
+#[tokio::test]
+async fn invalid_blog_scopes_are_rejected_before_budget_or_upstream() {
+    let f = Fixture::new();
+    let app = f.default_app();
+    for body in [
+        json!({"query":"x","source":"wordpress","folder":"a"}),
+        json!({"query":"x","source":"notes","blog_category":1}),
+        json!({"query":"x","source":"all","blog_category":1}),
+        json!({"query":"x","source":"wordpress","blog_category":true}),
+        json!({"query":"x","source":"wordpress","blog_category":1.0}),
+        json!({"query":"x","source":"unknown"}),
+    ] {
+        assert_eq!(
+            search(&app, body.clone()).await.status,
+            StatusCode::BAD_REQUEST,
+            "{body}"
+        );
+    }
+    *f.gateway.folders_result.lock().unwrap() = Some(
+        json!({"folders":[],"indexed_pages":1,"blog_posts":1,"blog_categories":[{"id":1,"name":"Known","parent":null,"posts":1}]}),
+    );
+    assert_eq!(
+        search(
+            &app,
+            json!({"query":"x","source":"wordpress","blog_category":99})
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(f.gateway.searches(), 0);
+    assert_eq!(
+        search(&app, json!({"query":"one"})).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        search(&app, json!({"query":"two"})).await.status,
+        StatusCode::OK,
+        "validation did not reserve paid budget"
+    );
+    f.clock.advance(3600);
+    let notes = search(&app, json!({"query":"one","source":"notes"}))
+        .await
+        .json();
+    assert_eq!(
+        notes["cached"], false,
+        "note-only scope has a distinct cache key"
+    );
+    assert_eq!(
+        search(&app, json!({"query":"one","source":"all"}))
+            .await
+            .json()["cached"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn cached_blog_category_is_freshly_gated_and_scope_keys_are_distinct() {
+    use axum::Json;
+    use axum::routing::get as route_get;
+    use std::sync::atomic::AtomicI64;
+    notes_rag_rs::install_crypto_provider();
+    let current = Arc::new(AtomicI64::new(10));
+    let category = current.clone();
+    let upstream=axum::Router::new().route("/catalog",route_get(move || {let category=category.clone();async move {
+        Json(json!({"schema_version":1,"revision":"c".repeat(64),"posts":[{"id":1,"title":"Synthetic","url":"https://cola16.app/synthetic/","published":"x","modified":"x","revision":"a".repeat(64),"category_path":[{"id":category.load(Ordering::SeqCst),"name":"Group"}]}]}))
+    }}));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let f = Fixture::new();
+    *f.gateway.search_result.lock().unwrap() = Some(
+        json!({"index":{"indexed_pages":1},"results":[{"title":"Synthetic","source_kind":"wordpress","post_id":1,"source_url":"https://cola16.app/synthetic/","source_revision":"a".repeat(64),"category_path":[{"id":10,"name":"Group"}],"content":"<p>one</p><p>two</p>"}]}),
+    );
+    let groups = json!([{"id":10,"parent":null,"name":"Group","posts":1},{"id":20,"parent":null,"name":"Group","posts":1}]);
+    *f.gateway.folders_result.lock().unwrap() = Some(
+        json!({"folders":[],"indexed_pages":1,"blog_posts":2,"blog_categories":groups,"blog_index_revision":"a".repeat(64)}),
+    );
+    let mut app = WebApp::new(
+        f.state.clone(),
+        f.gateway.clone(),
+        None,
+        None,
+        None,
+        None,
+        PREFIX.into(),
+        NOTE_PREFIX.into(),
+    )
+    .unwrap();
+    app.blog = Some(notes_rag_rs::blog::Source::new(&endpoint).unwrap());
+    app.catalog_ttl = std::time::Duration::ZERO;
+    let app = router(Arc::new(app));
+    let first = search(
+        &app,
+        json!({"query":"scope","source":"wordpress","blog_category":10}),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.json()["results"].as_array().unwrap().len(), 1);
+    assert_eq!(first.json()["results"][0]["excerpt"], "one\ntwo");
+    current.store(20, Ordering::SeqCst);
+    let cached = search(
+        &app,
+        json!({"query":"scope","source":"wordpress","blog_category":10}),
+    )
+    .await
+    .json();
+    assert_eq!(cached["cached"], true);
+    assert_eq!(cached["results"], json!([]));
+    assert_eq!(f.gateway.searches(), 1);
+    let changed = search(
+        &app,
+        json!({"query":"scope","source":"wordpress","blog_category":20}),
+    )
+    .await
+    .json();
+    assert_eq!(changed["cached"], false);
+    assert_eq!(changed["results"][0]["category_path"][0]["id"], 20);
+    assert_eq!(
+        f.gateway.searches(),
+        2,
+        "category selectors have separate paid/cache scopes"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn placeholder_blog_epoch_responses_are_not_saved() {
+    notes_rag_rs::install_crypto_provider();
+    let f = Fixture::new();
+    *f.gateway.folders_result.lock().unwrap() =
+        Some(json!({"folders":[],"indexed_pages":1,"blog_index_revision":"unavailable"}));
+    let mut app = WebApp::new(
+        f.state.clone(),
+        f.gateway.clone(),
+        None,
+        None,
+        None,
+        None,
+        PREFIX.into(),
+        NOTE_PREFIX.into(),
+    )
+    .unwrap();
+    app.blog = Some(notes_rag_rs::blog::Source::new("http://127.0.0.1:1").unwrap());
+    let app = router(Arc::new(app));
+    for _ in 0..2 {
+        let response = search(&app, json!({"query":"same"})).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.json()["cached"], false);
+    }
+    assert_eq!(f.gateway.searches(), 2);
 }

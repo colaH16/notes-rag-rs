@@ -58,10 +58,42 @@ An unavailable source hides blog results and reports the degraded scope while
 keeping note retrieval available; degraded responses are not saved in the search
 cache. The graph remains a note graph.
 
+The search API also accepts `source: all | notes | wordpress` (default `all`) and
+an optional positive integer `blog_category`. Categories are only valid for
+`wordpress`, which requires an empty note folder; selecting a note folder always
+excludes blog results. Source and category participate in cache keys. WordPress-only
+retrieval does not query private note rows or rely on note ACL/generation state.
+
+The folder catalog preserves `folders` and adds `blog_posts` and
+`blog_categories: [{id, parent, name, posts}]`. Category counts include primary
+hierarchy descendants. The WordPress editor's **Primary Term** field (provided by
+the currently installed RankMath plugin) selects the leaf; ancestor paths follow
+WordPress taxonomy parents. The source API appends `category_path` after computing
+the existing post revision, so taxonomy metadata changes that retain the existing post revision do not require
+re-embedding. A normal editor save can also change WordPress modified metadata;
+that still follows the existing changed-post sync policy.
+Rust uses the fresh hierarchy for filtering and combines its metadata fingerprint
+with the index epoch to invalidate old scoped search caches. Cached excerpts are
+also rechecked against the live primary path. Newly published Markdown posts and
+new category terms require no manual allowlist/code edits. Body indexing runs every
+15 minutes. The visible browser refreshes category metadata every 60 seconds,
+pauses while hidden, and queues refreshes behind an active search. With the server's
+60-second catalog cache, a newly added category can take about two minutes to appear
+in an already open page. Valid selections are retained; removed selections return
+to the blog root. Metadata refresh never automatically re-runs paid searches.
+
+WordPress result cards project Markdown/HTML to readable text using the existing
+Markdown renderer and sanitizer plus html5ever tokenization. Paragraph/list/table
+boundaries, code literals and link targets are retained. This display-only
+projection never changes indexed chunks or MCP evidence, and the browser still
+uses text insertion rather than inserting untrusted HTML.
+
 The blog generation epoch participates in search cache keys through the existing
 60-second catalog cache. Newly indexed content therefore invalidates previous
 whole-library search results after that catalog refresh, without resetting search
-budgets. Unchanged synchronization preserves those cache keys.
+budgets. Unchanged synchronization preserves those cache keys. Only primary-category
+metadata participates in the source-side fingerprint; ordinary title/body edits
+wait for the index epoch rather than causing two cache invalidations.
 
 Native author Markdown is preserved. The eight legacy block posts converted for
 this rollout retained their original HTML/title/date/URL/status, with rollback
@@ -100,6 +132,12 @@ signatures before any paid embedding.
 4. Deploy the compatible MCP image and source settings after full-index validation.
    Check mixed search, note-only folder search, cached queries, media previews and
    the existing note graph. Then enable the 15-minute CronJob.
+
+For the later source/category selector extension, deploy **MCP first, then web**.
+The previous web already supports WordPress and ignores additional metadata;
+its legacy search requests map to `source=all`. The new UI needs the extended
+MCP scope semantics. The new web cache key version also discards earlier raw-HTML
+WordPress display excerpts.
 
 The 2026-11-01 initial rollout indexed 245 posts into 686 chunks, all with 1536
 embedding dimensions. The initial three posts used 721 tokens; the remaining 242

@@ -294,7 +294,9 @@ async fn oversized_limit_is_capped_and_schema_explains_bounds() {
             limit: 8,
             include_history: true,
             min_similarity: 0.3,
-            folder: String::new()
+            folder: String::new(),
+            source: notes_rag_rs::search::service::SourceScope::All,
+            blog_category: None,
         }]
     );
     assert_eq!(result["structuredContent"]["effective_limit"], 8);
@@ -621,4 +623,22 @@ async fn legacy_transport_http_answers_match_python() {
         ),
         (StatusCode::MISDIRECTED_REQUEST, None, "Invalid Host header")
     );
+}
+
+#[tokio::test]
+async fn source_category_arguments_reach_retrieval_and_invalid_combinations_do_not() {
+    let s = server(None);
+    let response=rpc(&s.router,"tools/call",json!({"name":"search_notes","arguments":{"query":"Synthetic","source":"wordpress","blog_category":10}}),&[]).await;
+    assert_eq!(response.json()["result"]["isError"], false);
+    {
+        let requests = s.public.searches.lock().unwrap();
+        assert_eq!(
+            requests[0].source,
+            notes_rag_rs::search::service::SourceScope::WordPress
+        );
+        assert_eq!(requests[0].blog_category, Some(10));
+    }
+    let response=rpc(&s.router,"tools/call",json!({"name":"search_notes","arguments":{"query":"Synthetic","source":"wordpress","folder":"private"}}),&[]).await;
+    assert_eq!(response.json()["result"]["isError"], true);
+    assert_eq!(s.public.searches.lock().unwrap().len(), 1);
 }

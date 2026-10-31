@@ -7,6 +7,7 @@
 //! (see [`compat`]).
 
 pub mod blog;
+mod blog_excerpt;
 pub mod compat;
 pub mod config;
 pub mod embedding;

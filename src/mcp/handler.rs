@@ -82,6 +82,8 @@ impl NotesHandler {
                         include_history: parsed.include_history,
                         min_similarity: parsed.min_similarity,
                         folder: parsed.folder,
+                        source: parsed.source,
+                        blog_category: parsed.blog_category,
                     };
                     match service.search(request).await {
                         Ok(mut result) => {

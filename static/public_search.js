@@ -4,19 +4,50 @@ const query = document.querySelector("#query");
 const status = document.querySelector("#status");
 const results = document.querySelector("#results");
 const button = document.querySelector("#search-button");
-let running = false;
+const defaultQuery = query.dataset.defaultQuery;
 const folderColumns = document.querySelector("#folder-columns");
 const folderUp = document.querySelector("#folder-up");
 const folderAll = document.querySelector("#folder-all");
 const folderReload = document.querySelector("#folder-reload");
-let selectedFolder = "";
+let selectedSource = 'all';
+let selectedFolder = '';
+let selectedCategory = null;
 let folders = [];
+let blogCategories = [];
+let blogPosts = 0;
 let foldersReady = false;
 let foldersLoading = false;
+let foldersBackground = false;
+let foldersAttempted = false;
 let foldersReloadPending = false;
+let foldersReloadBackground = true;
 let ownerMode = false;
 let viewGeneration = 0;
+let catalogGeneration = 0;
+let searchSequence = 0;
+let activeSearch = null;
+let running = false;
 let sessionCheck = null;
+const folderScroll = new Map();
+function element(tag, text, className) {
+  const el = document.createElement(tag);
+  if (text !== undefined) el.textContent = text;
+  if (className) el.className = className;
+  return el;
+}
+function invalidateSearch(message) {
+  viewGeneration++; searchSequence++;
+  activeSearch?.abort(); activeSearch = null;
+  running = false; button.disabled = false; button.textContent = '검색 ↗';
+  results.replaceChildren(); status.className = '';
+  status.textContent = message || '선택한 범위에서 검색하려면 검색 버튼을 눌러 주세요.';
+  document.querySelector('.search-again').hidden = true;
+}
+function resetCatalog() {
+  catalogGeneration++; folders = []; blogCategories = []; blogPosts = 0;
+  foldersReady = false; foldersAttempted = false; selectedFolder = ''; selectedCategory = null;
+  invalidateSearch();
+}
 function showAccess(owner) {
   ownerMode = owner;
   document.querySelector('#access-badge').textContent = owner ? 'OWNER · 비공개 포함' : 'PUBLIC LIBRARY';
@@ -31,153 +62,197 @@ async function updateSession() {
     const response = await fetch('/api/session', {cache: 'no-store'});
     if (!response.ok) throw new Error('session');
     const session = await response.json();
-    if (ownerMode !== session.owner) {
-      viewGeneration++; results.replaceChildren(); folders = []; foldersReady = false; selectedFolder = '';
-      showAccess(session.owner); refreshFolderControls();
-    }
+    if (ownerMode !== session.owner) {resetCatalog(); showAccess(session.owner); refreshFolderControls();}
     showAccess(session.owner);
     document.querySelector('#login').hidden = session.owner || !session.login_available;
-    // Initial navigation, OIDC return and BFCache restore all load after session resolution.
     if (!foldersReady) await loadFolders();
   } catch (_) {
-    // Do not retain private excerpts on screen after a failed session check.
-    if (ownerMode) {viewGeneration++; results.replaceChildren(); folders = []; foldersReady = false; refreshFolderControls();}
+    if (ownerMode) {resetCatalog(); refreshFolderControls();}
   }
 }
 document.querySelector('#logout').addEventListener('click', async () => {
-  viewGeneration++; results.replaceChildren(); folders = []; foldersReady = false; selectedFolder = ''; refreshFolderControls();
+  resetCatalog(); refreshFolderControls();
   const response = await fetch('/auth/logout', {method: 'POST'});
   if (response.ok) location.replace('/');
   else status.textContent = '로그아웃에 실패했습니다. 다시 시도해 주세요.';
 });
-window.addEventListener('pageshow', () => checkSession());
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && ownerMode) {
-    viewGeneration++; results.replaceChildren(); folders = []; foldersReady = false; refreshFolderControls();
-  }
-  if (document.visibilityState === 'visible') checkSession();
-});
-setInterval(checkSession, 60000);
-const folderScroll = new Map();
-function element(tag, text, className) {
-  const el = document.createElement(tag);
-  if (text !== undefined) el.textContent = text;
-  if (className) el.className = className;
-  return el;
+async function refreshVisibleCatalog() {
+  if (document.hidden) return;
+  const hadCatalog = foldersReady; const generation = catalogGeneration;
+  await checkSession();
+  // Initial/session-change loads already refresh the catalog themselves.
+  if (!document.hidden && hadCatalog && generation === catalogGeneration && foldersReady) await loadFolders(true);
 }
-function refreshFolderControls() {
-  const focused = folderColumns.contains(document.activeElement) ? document.activeElement.dataset.folder : undefined;
-  // Hidden ancestor columns on mobile report scrollTop=0; do not erase their saved position.
-  folderColumns.querySelectorAll(".folder-list").forEach(list => {
-    if (list.getClientRects().length) folderScroll.set(list.dataset.parent, list.scrollTop);
-  });
-  const parents = [""];
-  if (selectedFolder) selectedFolder.split("/").forEach((part, index, parts) => parents.push(parts.slice(0, index + 1).join("/")));
-  const visible = parents.slice(-3);
-  const hasChildren = new Set(folders.map(item => item.parent));
-  folderColumns.replaceChildren();
-  folderColumns.setAttribute("aria-busy", String(foldersLoading));
-  visible.forEach(parent => {
-    const current = parent === selectedFolder;
-    const column = element("section", undefined, "folder-column" + (current ? " folder-column-current" : ""));
-    column.setAttribute("aria-label", parent || "노트북");
-    const heading = element("h3", parent ? parent.split("/").at(-1) : "노트북", "folder-column-title");
-    heading.title = parent || "전체 노트북"; heading.tabIndex = -1;
-    const list = element("ul", undefined, "folder-list"); list.dataset.parent = parent;
-    const children = folders.filter(item => item.parent === parent);
-    children.forEach(item => {
-      const row = element("button", undefined, "folder-row"); row.type = "button";
-      row.dataset.folder = item.path; row.title = item.path;
-      const selected = selectedFolder === item.path || selectedFolder.startsWith(item.path + "/");
-      row.setAttribute("aria-pressed", String(selected));
-      if (item.path === selectedFolder) row.setAttribute("aria-current", "true");
-      row.disabled = running || foldersLoading;
-      const icon = element("span", undefined, "folder-icon"); icon.setAttribute("aria-hidden", "true");
-      const count = element("span", item.pages.toLocaleString(), "folder-count");
-      count.setAttribute("aria-label", `${item.pages.toLocaleString()}개 문서`);
-      const arrow = element("span", hasChildren.has(item.path) ? "›" : "", "folder-arrow"); arrow.setAttribute("aria-hidden", "true");
-      row.append(icon, element("span", item.name, "folder-name"), count, arrow);
-      row.addEventListener("click", event => chooseFolder(item.path, event.detail === 0));
-      const li = element("li"); li.append(row); list.append(li);
-    });
-    if (!children.length) list.append(element("li", !foldersReady ? (foldersLoading ? "폴더 불러오는 중…" : "폴더 목록을 새로고침해 주세요.") : "하위 폴더가 없습니다. 이 폴더에서 검색할 수 있어요.", "folder-empty"));
-    column.append(heading, list); folderColumns.append(column);
-    list.scrollTop = folderScroll.get(parent) || 0;
-  });
-  for (let i = visible.length; i < 3; i++) {
-    const column = element("div", "폴더를 선택하면 하위 폴더가 여기에 표시됩니다.", "folder-column folder-placeholder");
-    column.setAttribute("aria-hidden", "true"); folderColumns.append(column);
+window.addEventListener('pageshow', () => refreshVisibleCatalog());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && ownerMode) {resetCatalog(); refreshFolderControls();}
+  if (document.visibilityState === 'visible') void refreshVisibleCatalog();
+});
+setInterval(refreshVisibleCatalog, 60000);
+function categoryTrail(id) {
+  const trail = []; const seen = new Set();
+  while (id !== null && !seen.has(id)) {
+    seen.add(id);
+    const item = blogCategories.find(c => c.id === id);
+    if (!item) break;
+    trail.unshift(item); id = item.parent;
   }
-  if (focused !== undefined) Array.from(folderColumns.querySelectorAll(".folder-row")).find(row => row.dataset.folder === focused)?.focus({preventScroll: true});
-  folderUp.disabled = folderAll.disabled = running || foldersLoading || !selectedFolder;
-  folderReload.disabled = running || foldersLoading;
-  document.querySelector("#folder-current").textContent = selectedFolder ? `선택 범위: 노트 ${selectedFolder} · 하위 폴더 포함` : "선택 범위: 전체 자료 · 노트와 공개 블로그";
+  return trail;
+}
+function chooseSource(source, keyboard = false) {
+  if (!['all','wordpress','notes'].includes(source)) return;
+  if (selectedSource !== source) {
+    selectedSource = source; selectedFolder = ''; selectedCategory = null;
+    invalidateSearch(); refreshFolderControls();
+  }
+  if (keyboard) folderColumns.querySelector(`[data-source="${source}"]`)?.focus();
+  flushCatalog();
 }
 function chooseFolder(path, keyboard = false) {
-  if (running || foldersLoading || path === selectedFolder) return;
-  selectedFolder = path;
-  results.replaceChildren(); status.className = "";
-  status.textContent = "선택한 범위에서 검색하려면 검색 버튼을 눌러 주세요.";
-  refreshFolderControls();
-  if (keyboard) {
-    const column = folderColumns.querySelector(".folder-column-current");
-    (column.querySelector(".folder-row") || column.querySelector("h3")).focus({preventScroll: true});
+  if (running || catalogBlocking() || path === selectedFolder) return;
+  selectedFolder = path; invalidateSearch(); refreshFolderControls();
+  if (keyboard) focusCurrentColumn();
+}
+function chooseCategory(id, keyboard = false) {
+  if (running || catalogBlocking() || id === selectedCategory) return;
+  selectedCategory = id; invalidateSearch(); refreshFolderControls();
+  if (keyboard) focusCurrentColumn();
+}
+function focusCurrentColumn() {
+  const current = folderColumns.querySelector('.folder-column-current');
+  (current?.querySelector('.folder-row') || current?.querySelector('h3'))?.focus({preventScroll:true});
+}
+function addColumn(title, children, current, scrollKey, makeRow, empty) {
+  const column = element('section',undefined,'folder-column'+(current?' folder-column-current':''));
+  column.setAttribute('aria-label',title);
+  const heading = element('h3',title,'folder-column-title');heading.title = title;heading.tabIndex = -1;
+  const list = element('ul',undefined,'folder-list');list.dataset.scrollKey=scrollKey;
+  children.forEach(item => {const li=element('li');li.append(makeRow(item));list.append(li);});
+  if (!children.length) list.append(element('li',foldersReady?empty:(foldersLoading?'목록 불러오는 중…':foldersAttempted?'목록을 새로고침해 주세요.':'자료 목록을 준비하고 있습니다.'),'folder-empty'));
+  column.append(heading,list);folderColumns.append(column);list.scrollTop=folderScroll.get(scrollKey)||0;
+}
+function rowParts(row, name, count, hasChildren, blog) {
+  row.type='button'; row.className='folder-row'; row.disabled=running||catalogBlocking();
+  const icon=element('span',blog?'#':undefined,blog?'category-icon':'folder-icon');icon.setAttribute('aria-hidden','true');
+  const amount=element('span',count.toLocaleString(),'folder-count');amount.setAttribute('aria-label',`${count.toLocaleString()}${blog?'편':'개 문서'}`);
+  const arrow=element('span',hasChildren?'›':'','folder-arrow');arrow.setAttribute('aria-hidden','true');
+  row.append(icon,element('span',name,'folder-name'),amount,arrow);
+}
+function noteRow(item) {
+  const row=element('button');row.dataset.folder=item.path;row.title=item.path;rowParts(row,item.name,item.pages,folders.some(f=>f.parent===item.path),false);
+  row.setAttribute('aria-pressed',String(selectedFolder===item.path||selectedFolder.startsWith(item.path+'/')));if(item.path===selectedFolder)row.setAttribute('aria-current','true');
+  row.addEventListener('click',event=>chooseFolder(item.path,event.detail===0));return row;
+}
+function categoryRow(item) {
+  const row=element('button');row.dataset.category=String(item.id);row.title=categoryTrail(item.id).map(c=>c.name).join(' › ');
+  rowParts(row,item.name,item.posts,blogCategories.some(c=>c.parent===item.id),true);
+  row.setAttribute('aria-pressed',String(categoryTrail(selectedCategory).some(c=>c.id===item.id)));if(item.id===selectedCategory)row.setAttribute('aria-current','true');
+  row.addEventListener('click',event=>chooseCategory(item.id,event.detail===0));return row;
+}
+function addSourceRoot(depth) {
+  const root=element('section',undefined,'folder-column source-root'+(!depth?' folder-column-current':' source-root-with-descendants'));
+  root.setAttribute('aria-label','검색할 자료');
+  const notes=folders.filter(f=>f.parent==='').reduce((sum,f)=>sum+f.pages,0);
+  [['wordpress','블로그(기록)',blogPosts,'편'],['notes','노트북',notes,'개']].forEach(([source,title,total,unit])=>{
+    const expanded=selectedSource===source;
+    const heading=element('button',undefined,'source-heading');heading.type='button';heading.dataset.source=source;
+    heading.setAttribute('aria-expanded',String(expanded));heading.setAttribute('aria-controls',source+'-root-list');
+    const arrow=element('span',undefined,'source-chevron');arrow.setAttribute('aria-hidden','true');
+    heading.append(arrow,element('span',title,'source-title'),element('span',foldersReady?total.toLocaleString()+unit:'','source-count'));
+    heading.addEventListener('click',event=>chooseSource(selectedSource===source?'all':source,event.detail===0));
+    const list=element('ul',undefined,'folder-list source-root-list');list.id=source+'-root-list';list.dataset.scrollKey=source+':root';list.hidden=!expanded;
+    const children=source==='wordpress'?blogCategories.filter(c=>c.parent===null):folders.filter(f=>f.parent==='');
+    children.forEach(item=>{const li=element('li');li.append(source==='wordpress'?categoryRow(item):noteRow(item));list.append(li);});
+    if(!children.length)list.append(element('li',foldersReady?(source==='wordpress'?'공개 블로그 카테고리가 없습니다. 블로그 전체를 검색할 수 있어요.':'검색할 수 있는 노트북이 없습니다.'):(foldersLoading?'목록 불러오는 중…':foldersAttempted?'목록을 새로고침해 주세요.':'자료 목록을 준비하고 있습니다.'),'folder-empty'));
+    root.append(heading,list);list.scrollTop=folderScroll.get(list.dataset.scrollKey)||0;
+  });
+  folderColumns.append(root);
+  root.querySelectorAll('.folder-list').forEach(list=>list.scrollTop=folderScroll.get(list.dataset.scrollKey)||0);
+}
+function refreshFolderControls() {
+  const active = folderColumns.contains(document.activeElement) ? document.activeElement : null;
+  const focusedFolder=active?.dataset.folder;const focusedCategory=active?.dataset.category;const focusedSource=active?.dataset.source;
+  folderColumns.querySelectorAll('.folder-list').forEach(list => {if(list.getClientRects().length)folderScroll.set(list.dataset.scrollKey,list.scrollTop);});
+  folderColumns.replaceChildren();folderColumns.setAttribute('aria-busy',String(catalogBlocking()));
+  const blog=selectedSource==='wordpress';
+  const trail=blog?categoryTrail(selectedCategory):[];
+  const noteParents=[];if(selectedSource==='notes'&&selectedFolder)selectedFolder.split('/').forEach((part,index,parts)=>noteParents.push(parts.slice(0,index+1).join('/')));
+  const depth=blog?trail.length:noteParents.length;
+  document.querySelector('#scope-heading').textContent='검색할 자료';
+  addSourceRoot(depth);
+  if(blog)trail.slice(-2).forEach(item=>addColumn(item.name,blogCategories.filter(c=>c.parent===item.id),item.id===selectedCategory,'blog:'+item.id,categoryRow,'하위 카테고리가 없습니다. 이 분류에서 검색할 수 있어요.'));
+  if(selectedSource==='notes')noteParents.slice(-2).forEach(parent=>addColumn(parent.split('/').at(-1),folders.filter(f=>f.parent===parent),parent===selectedFolder,'note:'+parent,noteRow,'하위 폴더가 없습니다. 이 폴더에서 검색할 수 있어요.'));
+  for(let i=Math.min(depth+1,3);i<3;i++) {
+    const message=selectedSource==='all'?'블로그나 노트북을 펼쳐 검색 범위를 좁힐 수 있어요.':`${blog?'카테고리':'폴더'}를 선택하면 하위 ${blog?'분류':'폴더'}가 여기에 표시됩니다.`;
+    const placeholder=element('div',message,'folder-column folder-placeholder');placeholder.setAttribute('aria-hidden','true');folderColumns.append(placeholder);
+  }
+  if(focusedFolder!==undefined)(Array.from(folderColumns.querySelectorAll('[data-folder]')).find(row=>row.dataset.folder===focusedFolder&&row.getClientRects().length)||folderColumns.querySelector('[data-source=notes]'))?.focus({preventScroll:true});
+  if(focusedCategory!==undefined)(Array.from(folderColumns.querySelectorAll('[data-category]')).find(row=>row.dataset.category===focusedCategory&&row.getClientRects().length)||folderColumns.querySelector('[data-source=wordpress]'))?.focus({preventScroll:true});
+  if(focusedSource!==undefined)folderColumns.querySelector(`[data-source="${focusedSource}"]`)?.focus({preventScroll:true});
+  folderUp.disabled=running||catalogBlocking()||!depth;
+  folderAll.disabled=running||selectedSource==='all';folderAll.textContent='전체';folderReload.disabled=running||catalogBlocking();
+  document.querySelector('#folder-current').textContent=selectedSource==='all'?'선택 범위: 전체 자료 · 블로그와 노트':blog?(selectedCategory===null?'선택 범위: 블로그(기록) 전체':`선택 범위: 블로그(기록) › ${trail.map(c=>c.name).join(' › ')} · 하위 카테고리 포함`):(selectedFolder?`선택 범위: 노트북 › ${selectedFolder} · 하위 폴더 포함`:'선택 범위: 모든 노트북');
+  document.querySelector('#folder-status').textContent=catalogBlocking()?'목록 불러오는 중…':!foldersReady?(foldersAttempted?'목록을 불러오지 못했습니다. 전체 범위 검색은 사용할 수 있어요.':'자료 목록을 준비하고 있습니다.'):selectedSource==='all'?'블로그나 노트북을 눌러 펼치세요. 전체 검색은 두 자료를 함께 찾습니다.':blog?'카테고리를 누르면 해당 분류와 하위 분류를 함께 검색합니다.':'폴더를 누르면 해당 폴더 아래를 모두 검색합니다.';
+}
+function catalogBlocking() {return foldersLoading && !foldersBackground;}
+function queueCatalog(background) {
+  foldersReloadBackground=foldersReloadPending?foldersReloadBackground&&background:background;
+  foldersReloadPending=true;
+}
+function flushCatalog() {
+  if(foldersReloadPending&&!running&&!foldersLoading&&!document.hidden) {
+    const background=foldersReloadBackground;foldersReloadPending=false;void loadFolders(background);
   }
 }
-async function loadFolders() {
-  const generation = viewGeneration;
-  // Do not lose a permission-change refresh behind an older in-flight request.
-  if (foldersLoading || running) {foldersReloadPending = true; return;}
-  foldersReloadPending = false;
-  foldersLoading = true; refreshFolderControls();
-  const hint = document.querySelector("#folder-status");
-  hint.textContent = "폴더 불러오는 중…";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+async function loadFolders(background=false) {
+  const generation=catalogGeneration;
+  if(foldersLoading||running){queueCatalog(background);return;}
+  foldersReloadPending=false;foldersReloadBackground=true;foldersLoading=true;foldersBackground=background&&foldersReady;
+  const quiet=foldersBackground;let render=!quiet;foldersAttempted=true;
+  if(!quiet)refreshFolderControls();
+  const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);
   try {
-    const response = await fetch("/api/folders", {signal: controller.signal, cache: 'no-store'});
-    const body = await response.json();
-    if (generation !== viewGeneration) return;
-    if (!response.ok) throw new Error(body.error || "폴더 목록 오류");
-    if (body.audience) showAccess(body.audience === 'owner');
-    folders = body.folders; foldersReady = true;
-    if (selectedFolder && !folders.some(item => item.path === selectedFolder)) {
-      selectedFolder = ""; results.replaceChildren();
-      status.textContent = "이전 폴더가 색인에 없어 전체 범위로 돌아왔습니다.";
-    }
-    hint.textContent = "폴더를 한 번 눌러 선택하세요. 선택한 폴더 아래를 모두 검색합니다.";
-  } catch (error) {
-    if (generation === viewGeneration) hint.textContent = "폴더 목록을 불러오지 못했습니다. 전체 검색은 그대로 사용할 수 있어요.";
+    const response=await fetch('/api/folders',{signal:controller.signal,cache:'no-store'});const body=await response.json();
+    if(generation!==catalogGeneration){queueCatalog(false);return;}
+    if(!response.ok||!Array.isArray(body.folders))throw new Error('catalog');
+    if(body.audience)showAccess(body.audience==='owner');
+    const nextFolders=body.folders;const nextPosts=Number.isSafeInteger(body.blog_posts)?body.blog_posts:0;const nextCategories=Array.isArray(body.blog_categories)?body.blog_categories:[];
+    const changed=!foldersReady||JSON.stringify([folders,blogPosts,blogCategories])!==JSON.stringify([nextFolders,nextPosts,nextCategories]);
+    if(changed){folders=nextFolders;blogPosts=nextPosts;blogCategories=nextCategories;render=true;}
+    foldersReady=true;
+    if(selectedFolder&&!folders.some(f=>f.path===selectedFolder)){selectedFolder='';invalidateSearch('이전 폴더가 색인에 없어 모든 노트북으로 돌아왔습니다.');render=true;}
+    if(selectedCategory!==null&&!blogCategories.some(c=>c.id===selectedCategory)){selectedCategory=null;invalidateSearch('이전 카테고리가 없어 블로그 전체 범위로 돌아왔습니다.');render=true;}
+  } catch (_) {
+    // A background outage retains the last usable catalog without interrupting
+    // keyboard navigation or announcing an unsolicited loading error.
+    if(generation===catalogGeneration&&!quiet){foldersReady=false;render=true;}
   } finally {
-    clearTimeout(timeout); foldersLoading = false; refreshFolderControls();
-    if (foldersReloadPending && !running && !document.hidden) void loadFolders();
+    clearTimeout(timeout);foldersLoading=false;foldersBackground=false;
+    if(render)refreshFolderControls();flushCatalog();
   }
 }
-folderColumns.addEventListener("keydown", event => {
-  if (running || foldersLoading) return;
-  const row = event.target.closest(".folder-row");
-  if (event.key === "ArrowLeft" && selectedFolder) {event.preventDefault(); folderUp.click(); return;}
-  if (!row) return;
-  const rows = Array.from(row.closest(".folder-list").querySelectorAll(".folder-row"));
-  const index = rows.indexOf(row);
-  let next;
-  if (event.key === "ArrowDown") next = rows[Math.min(rows.length - 1, index + 1)];
-  if (event.key === "ArrowUp") next = rows[Math.max(0, index - 1)];
-  if (event.key === "Home") next = rows[0];
-  if (event.key === "End") next = rows.at(-1);
-  if (next) {event.preventDefault(); next.focus();}
-  if (event.key === "ArrowRight") {event.preventDefault(); chooseFolder(row.dataset.folder, true);}
+folderColumns.addEventListener('keydown',event=>{
+  if(running||catalogBlocking())return;const row=event.target.closest('.folder-row');
+  if(event.key==='ArrowLeft'&&(selectedFolder||selectedCategory!==null)){event.preventDefault();folderUp.click();return;}
+  if(!row)return;const rows=Array.from(row.closest('.folder-list').querySelectorAll('.folder-row'));const index=rows.indexOf(row);let next;
+  if(event.key==='ArrowDown')next=rows[Math.min(rows.length-1,index+1)];if(event.key==='ArrowUp')next=rows[Math.max(0,index-1)];if(event.key==='Home')next=rows[0];if(event.key==='End')next=rows.at(-1);
+  if(next){event.preventDefault();next.focus();}
+  if(event.key==='ArrowRight'){event.preventDefault();if(selectedSource==='wordpress')chooseCategory(Number(row.dataset.category),true);else chooseFolder(row.dataset.folder,true);}
 });
-folderUp.addEventListener("click", event => chooseFolder(selectedFolder.includes("/") ? selectedFolder.slice(0, selectedFolder.lastIndexOf("/")) : "", event.detail === 0));
-folderAll.addEventListener("click", event => chooseFolder("", event.detail === 0));
-folderReload.addEventListener("click", loadFolders);
-checkSession();
+folderUp.addEventListener('click',event=>{if(selectedSource==='wordpress'){const trail=categoryTrail(selectedCategory);chooseCategory(trail.length>1?trail.at(-2).id:null,event.detail===0);}else chooseFolder(selectedFolder.includes('/')?selectedFolder.slice(0,selectedFolder.lastIndexOf('/')):'',event.detail===0);});
+folderAll.addEventListener('click',()=>chooseSource('all'));
+folderReload.addEventListener('click',()=>loadFolders(false));
+refreshFolderControls();checkSession();
 form.addEventListener("submit", async event => {
   event.preventDefault();
-  if (running || !query.value.trim()) return;
+  if (running) return;
+  if (!query.value.trim()) query.value = defaultQuery;
+  const requestSequence = ++searchSequence;
   running = true; button.disabled = true; button.textContent = "검색 중…";
   refreshFolderControls();
-  const searchFolder = selectedFolder;
+  const searchFolder = selectedSource === 'notes' ? selectedFolder : '';
+  const searchSource = selectedSource;
+  const searchCategory = selectedSource === 'wordpress' ? selectedCategory : null;
   const generation = viewGeneration;
   results.replaceChildren(); status.className = "loading";
   status.textContent = "자료의 의미를 비교하고 있습니다…";
@@ -190,12 +265,13 @@ form.addEventListener("submit", async event => {
     status.scrollIntoView({block: 'start', behavior: 'instant'});
   }
   const controller = new AbortController();
+  activeSearch = controller;
   const timeout = setTimeout(() => controller.abort(), 55000);
   try {
     const response = await fetch("/api/search", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({query: query.value.trim(), include_history: document.querySelector("#history").checked, folder: searchFolder}), signal: controller.signal});
+      body: JSON.stringify({query: query.value.trim(), include_history: document.querySelector("#history").checked, folder: searchFolder, source: searchSource, blog_category: searchCategory}), signal: controller.signal});
     const body = await response.json();
-    if (generation !== viewGeneration) return;
+    if (generation !== viewGeneration || requestSequence !== searchSequence) return;
     if (!response.ok) throw new Error(body.error || "검색에 실패했습니다.");
     if (body.audience) showAccess(body.audience === 'owner');
     status.className = "";
@@ -223,6 +299,7 @@ form.addEventListener("submit", async event => {
       title.append(link); head.append(title); card.append(head);
       const tags = element("div", undefined, "result-tags");
       tags.append(element('span', blog ? 'WordPress 블로그' : '노트'));
+      if (blog && Array.isArray(item.category_path) && item.category_path.length) tags.append(element('span',item.category_path.map(c=>c.name).join(' › ')));
       if (blog && typeof item.published === 'string') tags.append(element('span', '작성 ' + item.published.slice(0,10)));
       tags.append(element("span", item.history ? "과거 기록 · 현재 방법과 다를 수 있음" : "현재 자료", item.history ? "old" : "current"));
       if (item.visual_review) tags.append(element("span", "원본 배치·필기 확인 권장"));
@@ -239,20 +316,29 @@ form.addEventListener("submit", async event => {
       results.append(card);
     });
   } catch (error) {
+    if (generation !== viewGeneration || requestSequence !== searchSequence) return;
     results.replaceChildren(); status.className = "error";
     status.textContent = error.name === "AbortError" ? "검색이 지연되고 있습니다. 잠시 후 다시 시도해 주세요." : error.message;
   } finally {
-    clearTimeout(timeout); running = false; button.disabled = false; button.textContent = "검색 ↗";
+    clearTimeout(timeout);
+    if (requestSequence !== searchSequence) return;
+    activeSearch = null; running = false; button.disabled = false; button.textContent = "검색 ↗";
     refreshFolderControls();
     // Rendering adds page height. Scroll now so results really reach the viewport;
     // leave the user alone if they have already moved focus elsewhere.
     if (compactSearch && document.activeElement === status) {
       status.scrollIntoView({block: 'start', behavior: 'instant'});
     }
-    if (foldersReloadPending && !document.hidden) void loadFolders();
+    flushCatalog();
   }
 });
-document.querySelectorAll("[data-query]").forEach(el => el.addEventListener("click", () => {query.value = el.dataset.query; form.requestSubmit();}));
+document.querySelectorAll("[data-query]").forEach(el => el.addEventListener("click", () => {
+  if (el.dataset.querySource) {
+    chooseSource(el.dataset.querySource);
+    if (selectedSource === 'wordpress' && selectedCategory !== null) {selectedCategory = null; invalidateSearch(); refreshFolderControls();}
+  }
+  query.value = el.dataset.query; form.requestSubmit();
+}));
 
 // Do not summon an on-screen keyboard on touch devices or steal an existing focus.
 if (matchMedia('(hover:hover) and (pointer:fine)').matches &&

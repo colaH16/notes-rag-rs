@@ -514,6 +514,8 @@ async fn service_shapes_mcp_results_and_rejects_missing_folder_before_embedding(
         include_history: true,
         min_similarity: 0.35,
         folder: folder.into(),
+        source: notes_rag_rs::search::service::SourceScope::All,
+        blog_category: None,
     };
     let result = service.search(request("")).await.unwrap();
     let item = &result["results"][0];
@@ -581,7 +583,7 @@ async fn wordpress_index_shares_vectors_but_not_note_scope_and_hides_changed_pos
     }
     let mode = Arc::new(AtomicUsize::new(0));
     let m = mode.clone();
-    let app=axum::Router::new().route("/catalog",get(move ||{let mode=m.clone();async move {let state=mode.load(Ordering::SeqCst);Json(json!({"schema_version":1,"revision":"c".repeat(64),"posts":if state==2{vec![]}else{vec![json!({"id":1,"title":"Synthetic blog","url":"https://cola16.app/synthetic/","published":"2026-01-01","modified":"2026-01-02","revision":if state==0{"a".repeat(64)}else{"b".repeat(64)}})]}}))}}));
+    let app=axum::Router::new().route("/catalog",get(move ||{let mode=m.clone();async move {let state=mode.load(Ordering::SeqCst);Json(json!({"schema_version":1,"revision":"c".repeat(64),"posts":if state==2{vec![]}else{vec![json!({"id":1,"title":"Synthetic blog","url":"https://cola16.app/synthetic/","published":"2026-01-01","modified":"2026-01-02","category_path":[{"id":10,"name":"Root"},{"id":11,"name":"Leaf"}],"revision":if state==0{"a".repeat(64)}else{"b".repeat(64)}})]}}))}}));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -620,7 +622,142 @@ async fn wordpress_index_shares_vectors_but_not_note_scope_and_hides_changed_pos
         .unwrap()
         .get(0);
     assert_eq!(count, 0, "blog source never inserts fake notebook rows");
+    // The same primary hierarchy gates descendant queries without schema changes.
+    mode.store(0, Ordering::SeqCst);
+    let catalog = store.source.catalog().await.unwrap();
+    for id in [10, 11] {
+        let (hits, n) = store
+            .search_catalog(&query_vector(), 5, 0.35, true, Some(id), &catalog)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(hits.len(), 1);
+    }
+    let (none, _) = store
+        .search_catalog(&query_vector(), 5, 0.35, true, Some(999), &catalog)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    db.page(
+        'a',
+        "public",
+        "A.md",
+        "current",
+        &[("normal", "Note evidence", vector(0, 1.0))],
+    )
+    .await;
+    struct Counting(Arc<AtomicUsize>);
+    impl Embedder for Counting {
+        fn embed_one(
+            &self,
+            _text: String,
+        ) -> notes_rag_rs::search::service::BoxFuture<'_, notes_rag_rs::fault::Result<Vec<f64>>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                let mut v = vec![0.0; DIMENSIONS];
+                v[0] = 1.0;
+                Ok(v)
+            })
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = SearchService::new(
+        db.store(Some(&["public"])),
+        Arc::new(Counting(calls.clone())),
+        Arc::new(|_| Ok(1)),
+        notes_rag_rs::compat::ProducerManifest::embedded().unwrap(),
+        "https://notes.example.invalid".into(),
+        "OneNote/markdown".into(),
+        None,
+        false,
+    )
+    .unwrap()
+    .with_blog(Some(Arc::new(store)))
+    .unwrap();
+    use notes_rag_rs::search::service::SourceScope;
+    let request = |source, category| SearchRequest {
+        query: "Synthetic".into(),
+        limit: 5,
+        include_history: true,
+        min_similarity: 0.35,
+        folder: "".into(),
+        source,
+        blog_category: category,
+    };
+    let mixed = service
+        .search(request(SourceScope::All, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one query embedding is shared by both sources"
+    );
+    assert!(
+        mixed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["source_kind"] == "wordpress")
+    );
+    assert!(
+        mixed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["source_kind"] != "wordpress")
+    );
+    let notes = service
+        .search(request(SourceScope::Notes, None))
+        .await
+        .unwrap();
+    assert!(
+        notes["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["source_kind"] != "wordpress")
+    );
+    let before = calls.load(Ordering::SeqCst);
+    assert!(
+        service
+            .search(request(SourceScope::WordPress, Some(999)))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        before,
+        "unknown category refused before embedding"
+    );
+    // WordPress is public regardless of note generation/ACL state.
+    db.client
+        .batch_execute("UPDATE notes_rag.generation SET config_signature='other'")
+        .await
+        .unwrap();
+    let blog = service
+        .search(request(SourceScope::WordPress, None))
+        .await
+        .unwrap();
+    assert!(
+        blog["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["source_kind"] == "wordpress")
+    );
+    assert_eq!(
+        blog["results"][0]["content"],
+        mixed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["source_kind"] == "wordpress")
+            .unwrap()["content"]
+    );
+    assert_eq!(blog["index"]["scoped_pages"], 1);
     server.abort();
-    drop(store);
+    drop(service);
     db.drop().await;
 }

@@ -264,6 +264,8 @@ pub struct SearchArgs {
     pub include_history: bool,
     pub min_similarity: f64,
     pub folder: String,
+    pub source: crate::search::service::SourceScope,
+    pub blog_category: Option<i64>,
 }
 
 pub fn search_notes(arguments: &Map<String, Value>) -> Result<SearchArgs, ValidationErrors> {
@@ -276,6 +278,11 @@ pub fn search_notes(arguments: &Map<String, Value>) -> Result<SearchArgs, Valida
     let include_history = v.lax_bool("include_history", true);
     let min_similarity = v.lax_float("min_similarity", 0.35, 0.0, 1.0);
     let folder = v.string("folder", Some(""), 0, 2048);
+    let selection =
+        crate::search::service::scope_arguments(arguments, folder.as_deref().unwrap_or(""));
+    if selection.is_err() {
+        v.fail("source", "value_error", "Invalid source/category scope");
+    }
     match (query, limit, include_history, min_similarity, folder) {
         (Some(query), Some(limit), Some(include_history), Some(min_similarity), Some(folder))
             if v.errors.is_empty() =>
@@ -286,6 +293,8 @@ pub fn search_notes(arguments: &Map<String, Value>) -> Result<SearchArgs, Valida
                 include_history,
                 min_similarity,
                 folder,
+                source: selection.as_ref().expect("validated scope").0,
+                blog_category: selection.as_ref().expect("validated scope").1,
             })
         }
         _ => Err(ValidationErrors {
@@ -388,5 +397,29 @@ mod tests {
             error.message(),
             "1 validation error for search_notesArguments\nlimit\n  Input should be greater than or equal to 1 [type=greater_than_equal]"
         );
+    }
+    #[test]
+    fn strict_source_category_scope_and_defaults() {
+        let good = search_notes(&args(
+            json!({"query":"x","source":"wordpress","blog_category":12}),
+        ))
+        .ok()
+        .unwrap();
+        assert_eq!(good.source, crate::search::service::SourceScope::WordPress);
+        assert_eq!(good.blog_category, Some(12));
+        for bad in [
+            json!({"source":"blog"}),
+            json!({"source":"wordpress","blog_category":true}),
+            json!({"source":"wordpress","blog_category":1.5}),
+            json!({"source":"wordpress","blog_category":"12"}),
+            json!({"source":"notes","blog_category":12}),
+            json!({"source":"all","blog_category":12}),
+            json!({"source":"wordpress","folder":"a"}),
+            json!({"source":"wordpress","blog_category":0}),
+        ] {
+            let mut input = bad.as_object().cloned().unwrap();
+            input.insert("query".into(), "x".into());
+            assert!(search_notes(&input).is_err(), "{bad}");
+        }
     }
 }
