@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko">
+<head><script src="/cola-theme-init.js"></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>cola16 · 노트 검색</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><link rel="stylesheet" href="/cola-theme.css"><script src="/cola-theme.js" defer></script></head>
+<body class="cola-search"><a class="cola-skip" href="#main">본문 바로가기</a>
+<header><a class="brand" href="/">cola16<span>노트 검색</span></a><div class="auth-controls"><a href="/graph">지식 지도 ↗</a><label class="cola-theme"><span>테마</span><select aria-label="화면 테마" data-cola-theme-select hidden><option value="auto">자동</option><option value="light">라이트</option><option value="dark">다크</option></select></label><span id="access-badge" class="badge">PUBLIC LIBRARY</span><a id="login" href="/auth/login" hidden>본인 로그인</a><button id="logout" type="button" hidden>로그아웃</button></div></header><nav class="cola-spaces" aria-label="cola16의 공간"><a href="https://cola16.app/">기록</a><a href="https://pf.cola16.app/">포트폴리오</a><a href="https://apps.cola16.app/">도구</a><a href="/">노트 검색</a><a href="/graph">노트 지도</a></nav><p class="cola-status" id="cola-theme-status" role="status"></p>
+<main id="main">
+<section class="intro"><p class="eyebrow">기록해 둔 방법을 다시 찾는 곳</p><h1>내 노트에서,<br><span>필요한 답의 근거를.</span></h1><p class="lede">기술 노트를 의미로 검색합니다.<br class="mobile"> AI가 만든 설명 대신, 저장된 원문을 보여드려요.</p></section>
+<form id="search-form"><label class="sr-only" for="query">검색어</label><div class="search-box"><span class="search-icon" aria-hidden="true">⌕</span><input id="query" name="query" type="search" required maxlength="300" autocomplete="off" placeholder="예: zypper update가 실패할 때"><button id="search-button" type="submit">검색 <span aria-hidden="true">↗</span></button></div><div class="search-options"><label><input id="history" type="checkbox" checked> 과거 기록도 포함</label><span>원문 검색 · 답변 생성 없음</span></div></form>
+<section class="folder-scope" aria-label="검색 폴더 선택">
+<div class="folder-bar"><span>검색 폴더</span><button id="folder-up" type="button" disabled>← 상위</button><button id="folder-all" type="button" disabled>전체</button></div>
+<div id="folder-columns" class="folder-columns" aria-label="폴더 탐색" aria-busy="true"></div>
+<p id="folder-current" class="folder-current">선택 범위: 전체 노트 · 하위 폴더 포함</p>
+<div class="folder-hint"><span id="folder-status" role="status" aria-live="polite">색인된 폴더를 불러옵니다.</span><button id="folder-reload" type="button">목록 새로고침</button></div>
+</section>
+<div class="examples"><span>이렇게 찾아보세요</span><button type="button" data-query="zypper update">zypper update</button><button type="button" data-query="ZFS ARC 메모리 제한">ZFS 메모리 제한</button><button type="button" data-query="tailscale 설치">Tailscale 설치</button></div>
+<section class="results-section" aria-label="검색 결과"><div id="status" role="status" aria-live="polite">검색어를 입력하면 관련 노트가 여기에 표시됩니다.</div><a class="search-again" hidden href="#query">검색어 수정 ↑</a><div id="results"></div></section>
+</main>
+<footer><span>Notes RAG · SilverBullet 원문 연결</span><span>공개 노트는 로그인 없이 · 비공개 노트는 본인만</span><p>새 검색은 전체 이용자 합산 시간당 60회·하루 300회(UTC 기준)까지. 같은 검색의 결과·발췌문은 최대 3시간 캐시로 제공되며, 페이지 보기는 현재 원문을 불러옵니다. 본인 로그인은 최대 1시간 유지되며, 여기서 로그아웃해도 authentik의 다른 서비스 로그인은 유지됩니다.</p></footer>
+</body></html>

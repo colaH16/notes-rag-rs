@@ -1,0 +1,73 @@
+[package]
+name = "notes-rag-rs"
+description = "Rust port of the notes-rag public search web gateway and internal read-only MCP retrieval service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+# No license is declared: the original Python repository has no license file.
+# See README.md (원본 출처와 저작권).
+
+[[bin]]
+name = "notes-rag-rs"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP serving (Python: Starlette + uvicorn)
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "service", "http1"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Official MCP Rust SDK (Python: mcp==2.2.0)
+rmcp = { version = "=3.8.0", default-features = false, features = [
+    "server",
+    "transport-streamable-http-server",
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+
+# Outbound HTTP (Python: urllib for embeddings, httpx2 for MCP/OIDC)
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+openidconnect = { version = "4", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Data
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = "0.14"
+rustls-native-certs = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Text processing (Python: tokenizers==0.23.2, markdown-it-py==4.2.0, nh3==0.3.7 -> ammonia 4.1.4)
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
+markdown-it = { version = "=0.6.1", default-features = false }
+ammonia = "=4.1.4"
+unicode-ident = "1"
+unicode-general-category = "0.6"
+caseless = "0.2"
+
+# Crypto / misc
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+subtle = "2"
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 4

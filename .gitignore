@@ -1,0 +1,7 @@
+/target
+/.local-config
+*.db
+*.db-journal
+.env*
+__pycache__/
+/tests/oracle/out/
