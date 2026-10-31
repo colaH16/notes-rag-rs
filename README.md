@@ -1,14 +1,13 @@
-# notes-rag-rs (임시 이름)
+# notes-rag-rs
 
 notes-rag의 **공개 검색 웹 게이트웨이**와 **내부 읽기 전용 MCP 검색 서비스**를 Rust로 옮긴 구현입니다.
 바이너리 하나가 환경 변수 `RAG_ROLE=web|mcp`로 두 역할 중 하나를 실행합니다.
 
-> **현재 상태: 로컬 준비 단계 · 배포 안 됨 · 게시 안 됨 · 프로덕션 검증 안 됨**
+> **현재 상태: 로컬 검증 완료 · 코드/이미지 게시 진행 중 · 운영 전환 전**
 >
-> - 원격 저장소, 이미지 게시 대상(GHCR 이름 포함)은 **아직 승인되지 않았습니다.** `notes-rag-rs`는 임시 이름입니다.
-> - 로컬 커밋만 있고 push하지 않았습니다. CI 워크플로와 Dockerfile은 준비만 했고 실행한 적이 없습니다.
-> - 실제 코퍼스, 실제 DB, 실제 임베딩/OIDC 엔드포인트, Kubernetes에는 연결하지 않았습니다. 모든 검증은 합성 데이터와 목(mock) 서비스로 했습니다.
-> - 운영 전환 전에 아래 "운영 전환 계획"의 카나리/읽기 전용 검증을 반드시 거쳐야 합니다.
+> - 게시 대상: [colaH16/notes-rag-rs](https://github.com/colaH16/notes-rag-rs), 이미지 `ghcr.io/colah16/notes-rag-rs`.
+> - 아래 검증 결과는 합성 데이터와 모의 서비스에서 얻었습니다. CI·컨테이너·실제 운영 검증 결과는 확인 후 갱신합니다.
+> - Python 인덱서·OCR·잡은 기존 구현을 계속 사용합니다. 성능·메모리 비교는 별도로 반복 측정 중입니다.
 
 ## 1. 이전 범위
 
@@ -203,7 +202,7 @@ DB 스키마는 바꾸지 않습니다. Rust는 DDL을 실행하지 않으며 �
 
 ## 10. 시험 방법과 결과
 
-자세한 수치는 `../rag-claude-implementation-20261031/result.md`에도 있습니다.
+아래 표는 로컬 검증 결과이며, 재현용 Python 비교 도구는 `tests/oracle/`에 있습니다.
 
 ```sh
 cargo fmt --check
@@ -230,15 +229,15 @@ python -I tests/oracle/dump_mcp_contract.py <python-src>      # 계약 재캡처
 
 **시험하지 못한 것:** 컨테이너 이미지 빌드(로컬 rootless podman 사용 불가), CI 실행, arm64, PostgreSQL TLS 연결, 실제 OIDC 공급자, 실제 코퍼스/DB/임베딩, Open WebUI 클라이언트, 부하·지연 측정(성능 주장 없음).
 
-## 11. 컨테이너와 CI (준비만 함)
+## 11. 컨테이너와 CI
 
 - `Dockerfile`: Ubuntu 24.04(다이제스트 고정) + `ca-certificates`, 미리 빌드한 바이너리, SHA-256 확인한 토크나이저. UID/GID 4261(기존 PVC 소유권과 같음), 루트 파일 시스템 읽기 전용 가능. 쓰기가 필요한 곳은 web의 `SEARCH_STATE_DB` 디렉터리와(설정했다면) MCP의 `RAG_ALERT_DIR`뿐입니다. 비밀값은 이미지에 없습니다.
 - `scripts/fetch_tokenizer.sh`: 원본 Docker 흐름과 같은 게시자 리비전 + SHA-256 확인(값은 매니페스트에서 읽음).
-- `.github/workflows/ci.yml`: 고정 커밋 액션, `--locked`, amd64/arm64 네이티브 러너, pgvector 서비스 컨테이너(원본과 같은 다이제스트)로 DB 시험. **이미지 push는 저장소 변수 `PUBLISH_IMAGE=true`일 때만**, 저장소 이름에서 나온 GHCR 이름으로만 합니다. 아직 실행한 적 없습니다.
+- `.github/workflows/ci.yml`: 고정 커밋 액션, `--locked`, amd64/arm64 네이티브 러너, pgvector 서비스 컨테이너(원본과 같은 다이제스트)로 DB 시험. **main 브랜치에서만 이미지를 게시**하며, 저장소 이름에서 나온 GHCR 이름을 사용합니다. PR에서는 빌드·검증만 수행합니다.
 
-## 12. 운영 전환 계획 (승인 후)
+## 12. 운영 전환 계획
 
-1. **게시 대상 승인** → 저장소 생성, CI 통과, 비공개 이미지 확인.
+1. **게시·이미지 검증:** 승인된 저장소에서 CI를 통과한 이미지의 다이제스트와 실행 권한·CA 인증서·기동 설정을 확인합니다.
 2. **MCP 카나리(읽기 전용):** 기존 MCP Deployment는 그대로 두고, 같은 env/마운트/네트워크 정책으로 Rust MCP를 별도 Deployment·Service로 띄웁니다(DB 읽기 전용 계정, 코퍼스 읽기 전용). 내부에서 `scripts/check_mcp.py`(원본)와 공식 SDK로 legacy/auto 연결, 도구 목록이 계약과 같은지, 같은 질의를 Python/Rust에 보내 결과 JSON이 같은지 비교합니다. 임베딩 비용이 드는 질의는 최소한으로 합니다.
 3. **web 카나리:** Rust web을 별도 Service로 띄우되 **별도 SQLite**와 낮은 예산(`SEARCH_DAILY_LIMIT`)을 줍니다(같은 PVC를 두 파드가 공유하지 않음). 비공개 경로로 `/`, `/api/folders`, `/api/search`, `/api/graph`, `/read`, 로그인/로그아웃을 확인합니다. Python web은 공개 트래픽을 계속 받습니다.
 4. **전환:** Python web을 0으로 줄인 다음 같은 PVC로 Rust web을 올립니다(예산·세션 유지). MCP는 Service 선택자를 Rust로 바꿉니다. 진행 중이던 로그인만 다시 해야 합니다.
