@@ -1,0 +1,30 @@
+{
+  "seed": 20261031,
+  "notebooks": 17,
+  "public_notebooks": 13,
+  "pages": 2220,
+  "chunks": 3161,
+  "normal_chunks": 2914,
+  "fallback_chunks": 247,
+  "old_pages": 112,
+  "public_pages": 2175,
+  "missing_pages_rows": 5,
+  "indexed_without_source_file": 4,
+  "queries": 9000,
+  "topics": 360,
+  "dimensions": 1536,
+  "silverbullet_root": "OneNote/markdown",
+  "scope_signature": "75f09ad10f6d59592b912b01be7492701c8931daa00c25713fb545d8b845da0b",
+  "config_signature": "f9ec8b90bdd6e84f7b8900750320b33b3ecc0b1e6ddf3c70c0f1f38eeba68ec8",
+  "tokenizer_version": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af:83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d:tokenizers-0.23.2",
+  "access_revision": "32ee05f946a47b2d1fa141dcc336ed07ec02cf824068a347756704b95d92815d",
+  "sha256": {
+    "db/chunks.jsonl": "bd09749683ea3b931bf4e248d8c482c31f81e1187d0ab2d25b0bf62385c5590a",
+    "db/missing.jsonl": "eff0b42d3f707f6a41156808300110c3a875cd21cd416eb7bf05e6f611ff4aaf",
+    "db/pages.jsonl": "77fb83682e350117a01ddb4308c738c5481adcf9828a352e3df81ab4b8dd3b4a",
+    "policy/access.json": "19d3b2610c004f04160349037382b016dfbfc86ac4072179f86a8a6e5f7b95b6",
+    "queries.json": "939edb08289524a74dfa5aa331b546ac48ce72168ed620c047c48af40fa63087",
+    "selection/markdown.json": "ac0c8dc2d28b8081509670cb9c30c025054d88dede39d89fce97c18c92221ffb",
+    "corpus/*": "11da36a06db6793a333946934c611a55cefae8786e06e7e28d2bf8d120f33402"
+  }
+}
