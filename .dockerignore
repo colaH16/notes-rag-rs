@@ -1,0 +1,4 @@
+# Allowlist: only the prebuilt binary and the checksum-verified tokenizer.
+*
+!target/release/notes-rag-rs
+!build/qwen-tokenizer.json

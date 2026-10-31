@@ -1,0 +1,3 @@
+Copied verbatim from the original Python notes-rag repository at commit
+754a97398ac1d6ef313605f84eb7249db8eb556e (same owner, no license file).
+Used only to create throwaway test databases; the Rust services never run DDL.

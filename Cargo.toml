@@ -66,6 +66,8 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Mock OIDC provider in tests/auth.rs only (not enabled in release builds).
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "form"] }
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,132 @@
+name: Checks and multiarch image
+# Prepared, not yet used: no remote/publication target has been approved.
+# Images are only pushed when the repository variable PUBLISH_IMAGE == 'true'
+# on main, to the repository-derived GHCR name (ghcr.io/<owner>/<repo>).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: notes-rag-rs-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+jobs:
+  test-and-image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain 1.99.1
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+
+      - name: Pinned tokenizer (publisher revision + SHA-256)
+        run: |
+          mkdir -p build
+          scripts/fetch_tokenizer.sh build/qwen-tokenizer.json
+
+      - name: Format, lint, unit and integration tests, release build
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked --release --bin notes-rag-rs
+
+      - name: Binary smoke (no network, no credentials)
+        run: |
+          ! target/release/notes-rag-rs unexpected-argument
+          ! env -i RAG_ROLE=none target/release/notes-rag-rs
+          ! env -i RAG_ROLE=web target/release/notes-rag-rs
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Image name derived from this repository
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGE == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: image
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: ${{ !(github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGE == 'true') }}
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGE == 'true' }}
+          tags: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Read-only, non-root, no-network image smoke
+        if: steps.image.outputs.digest == '' || vars.PUBLISH_IMAGE != 'true'
+        run: |
+          image=${{ steps.name.outputs.image }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          docker run --rm --entrypoint /bin/sh "$image" -c 'id -u; id -g' | tr '\n' ' ' | grep -q '^4261 4261 '
+          ! docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges -e RAG_ROLE=mcp "$image"
+      - name: Record architecture digest
+        if: steps.image.outputs.digest != ''
+        run: echo '${{ matrix.arch }} ${{ steps.image.outputs.digest }}' >> "$GITHUB_STEP_SUMMARY"
+
+  postgres-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        # Same digest-pinned pgvector image as the original Python workflow.
+        image: pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_PASSWORD: synthetic-ci-only
+          POSTGRES_DB: postgres
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Rust toolchain 1.99.1
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Isolated PostgreSQL + pgvector search tests
+        env:
+          RAG_TEST_DATABASE_URL: postgresql://postgres:synthetic-ci-only@127.0.0.1:5432/postgres?sslmode=disable
+        run: cargo test --locked --test db
+
+  manifest:
+    needs: [test-and-image, postgres-integration]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGE == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested multiarch manifest (no deployment)
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY,,}
+          docker buildx imagetools create -t "$image:sha-${{ github.sha }}" \
+            "$image:sha-${{ github.sha }}-amd64" "$image:sha-${{ github.sha }}-arm64"
+          docker buildx imagetools inspect "$image:sha-${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"

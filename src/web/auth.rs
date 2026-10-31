@@ -163,6 +163,7 @@ impl OwnerAuth {
         let mut mac = Hmac::<Sha256>::new_from_slice(session_key.as_bytes())
             .map_err(|_| "invalid session key")?;
         mac.update(b"notes-rag-rs/oidc-flow-cookie/v1");
+        crate::install_crypto_provider();
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

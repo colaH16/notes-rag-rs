@@ -209,11 +209,12 @@ impl Reader {
         if raw.len() as u64 > MAX_NOTE {
             return Err(Fault::NotReadable);
         }
-        let normalized = match native::normalize(&raw, path, &self.config.selection, self.config.native_notes) {
-            Ok(bytes) => bytes,
-            Err(Fault::Value(_)) => return Err(Fault::NotReadable),
-            Err(other) => return Err(other),
-        };
+        let normalized =
+            match native::normalize(&raw, path, &self.config.selection, self.config.native_notes) {
+                Ok(bytes) => bytes,
+                Err(Fault::Value(_)) => return Err(Fault::NotReadable),
+                Err(other) => return Err(other),
+            };
         let decoded = String::from_utf8(normalized).map_err(|_| Fault::NotReadable)?;
         let (metadata, body) = frontmatter(&decoded)?;
         let notebook = metadata.get("onenote_notebook_id").and_then(Value::as_str);

@@ -77,6 +77,7 @@ pub async fn run(env: &Env) -> Result<(), String> {
         config.note_prefix.clone(),
     )
     .map_err(|e| format!("web: {e}"))?;
+    let app = Arc::new(app);
     println!("Notes RAG web ready.");
     crate::serve::serve(
         config.listen,

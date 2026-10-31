@@ -5,3 +5,4 @@
 .env*
 __pycache__/
 /tests/oracle/out/
+/build

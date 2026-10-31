@@ -15,6 +15,7 @@ use crate::tokenizer::QwenTokenizer;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -58,7 +59,10 @@ impl Embedder for RemoteEmbedder {
 /// Token counting seam (the real tokenizer or a test double).
 pub type TokenCount = Arc<dyn Fn(&str) -> std::result::Result<usize, String> + Send + Sync>;
 
-pub struct SearchService {
+/// Cheap handle; the state is shared with the tasks that run retrievals.
+pub struct SearchService(Arc<ServiceState>);
+
+pub struct ServiceState {
     pub store: SearchStore,
     embedder: Arc<dyn Embedder>,
     count: TokenCount,
@@ -67,8 +71,16 @@ pub struct SearchService {
     root: String,
     reader: Option<Arc<Reader>>,
     owner: bool,
-    slots: Semaphore,
+    slots: Arc<Semaphore>,
     graph: SemanticGraph,
+}
+
+impl Deref for SearchService {
+    type Target = ServiceState;
+
+    fn deref(&self) -> &ServiceState {
+        &self.0
+    }
 }
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -120,7 +132,7 @@ impl SearchService {
         owner: bool,
     ) -> Result<Self> {
         citation_url("startup-check.md", &base_url, &root)?;
-        Ok(Self {
+        Ok(Self(Arc::new(ServiceState {
             store,
             embedder,
             count,
@@ -129,27 +141,55 @@ impl SearchService {
             root,
             reader,
             owner,
-            slots: Semaphore::new(2),
+            slots: Arc::new(Semaphore::new(2)),
             graph: SemanticGraph::default(),
-        })
+        })))
     }
 
-    /// `bounded()`: at most two concurrent retrievals; anything that is not a
-    /// fixed `SearchError` becomes a generic message (DB/HTTP errors may
-    /// contain private SQL values or credentials).
-    async fn bounded<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        let Ok(_permit) = self.slots.try_acquire() else {
-            return Err(Fault::search("Search is busy; retry shortly."));
-        };
-        match work.await {
-            Ok(value) => Ok(value),
-            Err(Fault::Search(message)) => Err(Fault::Search(message)),
-            Err(_) => Err(Fault::search(
-                "Retrieval failed; check service connectivity/configuration.",
-            )),
-        }
+    /// Run `work` under `bounded()` on its own task with shared state.
+    async fn bounded<T, F>(&self, work: impl FnOnce(Arc<ServiceState>) -> F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        bounded(&self.0.slots, work(self.0.clone())).await
     }
+}
 
+/// `bounded()`: at most two concurrent retrievals; anything that is not a
+/// fixed `SearchError` becomes a generic message (DB/HTTP errors may
+/// contain private SQL values or credentials).
+///
+/// The permit travels with the work into a spawned task. If the caller is
+/// dropped (MCP client disconnect, web timeout) the work still runs to
+/// completion and keeps its slot until then, like Python's worker thread
+/// that held the `BoundedSemaphore` after `anyio` cancellation. Otherwise
+/// every abandoned request would free its slot while its PostgreSQL backend
+/// or embedding call kept running, and the per-audience limit of two would
+/// no longer bound database work.
+async fn bounded<T, F>(slots: &Arc<Semaphore>, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    let Ok(permit) = slots.clone().try_acquire_owned() else {
+        return Err(Fault::search("Search is busy; retry shortly."));
+    };
+    let task = tokio::spawn(async move {
+        let result = work.await;
+        drop(permit);
+        result
+    });
+    match task.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(Fault::Search(message))) => Err(Fault::Search(message)),
+        Ok(Err(_)) | Err(_) => Err(Fault::search(
+            "Retrieval failed; check service connectivity/configuration.",
+        )),
+    }
+}
+
+impl ServiceState {
     async fn visible(&self, paths: Vec<String>) -> Result<Option<BTreeSet<String>>> {
         let Some(reader) = self.reader.clone() else {
             return Ok(None);
@@ -160,7 +200,9 @@ impl SearchService {
             .map_err(|_| Fault::Other("visibility task failed"))??;
         Ok(Some(visible))
     }
+}
 
+impl SearchService {
     /// `search(query, limit, include_history, min_similarity, folder)`
     pub async fn search(&self, request: SearchRequest) -> Result<Value> {
         if crate::scope::validate_folder(&request.folder).is_err() {
@@ -176,19 +218,20 @@ impl SearchService {
             return Err(Fault::search("Invalid query or search limits."));
         }
         let text = self.manifest.query_text(stripped);
-        self.bounded(async {
-            if (self.count)(&text).map_err(|_| Fault::Other("tokenizer failure"))? > 2048 {
+        self.bounded(move |state| async move {
+            let this = &*state;
+            if (this.count)(&text).map_err(|_| Fault::Other("tokenizer failure"))? > 2048 {
                 return Err(Fault::search("Query exceeds 2048 tokens."));
             }
-            let info = self.store.check(&request.folder).await?;
+            let info = this.store.check(&request.folder).await?;
             if !request.folder.is_empty() && info.scoped_pages == 0 {
                 return Err(Fault::search(
                     "Folder is not in the current index. Refresh the folder list.",
                 ));
             }
-            let vector = self.embedder.embed_one(text.clone()).await?;
+            let vector = this.embedder.embed_one(text.clone()).await?;
             let literal = vector_literal(&vector);
-            let (mut rows, info) = self
+            let (mut rows, info) = this
                 .store
                 .search(
                     &literal,
@@ -198,7 +241,7 @@ impl SearchService {
                     &request.folder,
                 )
                 .await?;
-            if let Some(visible) = self
+            if let Some(visible) = this
                 .visible(rows.iter().map(|r| r.relative_path.clone()).collect())
                 .await?
             {
@@ -209,8 +252,8 @@ impl SearchService {
                 .map(|row| {
                     result_item(
                         row,
-                        &self.base_url,
-                        &self.root,
+                        &this.base_url,
+                        &this.root,
                         super::context::CONTEXT_CHARACTERS,
                     )
                 })
@@ -227,13 +270,16 @@ impl SearchService {
 
     /// `folders()`: catalog only, no embedding call.
     pub async fn folders(&self) -> Result<Value> {
-        self.bounded(self.store.folders()).await
+        self.bounded(|state| async move { state.store.folders().await })
+            .await
     }
 
     /// `graph()`: cached semantic graph, re-filtered for live visibility.
     pub async fn graph(&self) -> Result<Value> {
-        self.bounded(async {
-            let graph = self.graph.get(&self.store).await?;
+        // The whole build runs on the bounded task: a cancelled caller neither
+        // frees the slot early nor discards a finished graph (it is cached).
+        self.bounded(|state| async move {
+            let graph = state.graph.get(&state.store).await?;
             let paths: Vec<String> = graph["nodes"]
                 .as_array()
                 .map(|nodes| {
@@ -243,7 +289,7 @@ impl SearchService {
                         .collect()
                 })
                 .unwrap_or_default();
-            match self.visible(paths).await? {
+            match state.visible(paths).await? {
                 Some(visible) => visible_graph(&graph, &visible),
                 None => Ok(graph),
             }
@@ -260,16 +306,18 @@ impl SearchService {
         if !valid_key || !(0..=100000).contains(&ordinal) {
             return Err(Fault::search("Invalid chunk reference."));
         }
-        self.bounded(async {
-            let (mut row, info) = self.store.chunk(page_key, ordinal).await?;
+        let page_key = page_key.to_string();
+        self.bounded(move |state| async move {
+            let this = &*state;
+            let (mut row, info) = this.store.chunk(&page_key, ordinal).await?;
             if let Some(hit) = &row
-                && let Some(visible) = self.visible(vec![hit.relative_path.clone()]).await?
+                && let Some(visible) = this.visible(vec![hit.relative_path.clone()]).await?
                 && !visible.contains(&hit.relative_path)
             {
                 row = None;
             }
             let result = match &row {
-                Some(hit) => result_item(hit, &self.base_url, &self.root, CHUNK_CHARACTERS)?,
+                Some(hit) => result_item(hit, &this.base_url, &this.root, CHUNK_CHARACTERS)?,
                 None => Value::Null,
             };
             let mut out = Map::new();
@@ -278,5 +326,76 @@ impl SearchService {
             Ok(Value::Object(out))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn abandoned_callers_keep_their_slot_until_the_work_finishes() {
+        let slots = Arc::new(Semaphore::new(2));
+        let gate = Arc::new(Semaphore::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let work = || {
+            let (gate, finished) = (gate.clone(), finished.clone());
+            async move {
+                let _open = gate.acquire().await.map_err(|_| Fault::Other("closed"))?;
+                finished.fetch_add(1, SeqCst);
+                Ok::<(), Fault>(())
+            }
+        };
+        for _ in 0..2 {
+            // The caller goes away (client disconnect, web timeout) first.
+            let abandoned =
+                tokio::time::timeout(Duration::from_millis(20), bounded(&slots, work())).await;
+            assert!(abandoned.is_err());
+        }
+        assert_eq!(finished.load(SeqCst), 0);
+        assert_eq!(
+            bounded(&slots, async { Ok(()) }).await,
+            Err(Fault::search("Search is busy; retry shortly.")),
+            "slots stay taken while abandoned work is still running"
+        );
+        gate.add_permits(2);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while slots.available_permits() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(finished.load(SeqCst), 2, "abandoned work ran to completion");
+        assert_eq!(bounded(&slots, async { Ok(7) }).await, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn only_search_errors_reach_callers_and_slots_are_returned() {
+        let slots = Arc::new(Semaphore::new(2));
+        assert_eq!(
+            bounded::<(), _>(&slots, async {
+                Err(Fault::search("Invalid chunk reference."))
+            })
+            .await,
+            Err(Fault::search("Invalid chunk reference."))
+        );
+        let generic: Result<()> = Err(Fault::search(
+            "Retrieval failed; check service connectivity/configuration.",
+        ));
+        assert_eq!(
+            bounded::<(), _>(&slots, async { Err(Fault::Other("database failure")) }).await,
+            generic
+        );
+        let panicking = async {
+            if std::hint::black_box(true) {
+                panic!("synthetic failure");
+            }
+            Ok(())
+        };
+        assert_eq!(bounded::<(), _>(&slots, panicking).await, generic);
+        assert_eq!(slots.available_permits(), 2);
     }
 }

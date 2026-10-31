@@ -17,8 +17,10 @@ use markdown_it::parser::core::CoreRule;
 use markdown_it::parser::extset::MarkdownItExt;
 use markdown_it::parser::inline::builtin::InlineParserRule;
 use markdown_it::parser::inline::{InlineRoot, InlineRule, InlineState};
+use markdown_it::plugins::cmark::block::blockquote::Blockquote;
 use markdown_it::plugins::cmark::block::heading::ATXHeading;
 use markdown_it::plugins::cmark::block::lheading::SetextHeader;
+use markdown_it::plugins::cmark::block::list::{BulletList, ListItem, OrderedList};
 use markdown_it::plugins::cmark::inline::image::Image;
 use markdown_it::{MarkdownIt, Node};
 use std::borrow::Cow;
@@ -112,6 +114,35 @@ impl CoreRule for HeadingIds {
     }
 }
 
+/// markdown-it-py's block nesting limit (`maxNesting = 20`). Its block
+/// tokenizer stops when a nested call starts at `state.level >= 20`, where
+/// every blockquote and every list/list-item open token adds one level, so
+/// such a container is rendered empty. The Rust parser does not track the
+/// level, so the same rule is applied to the parsed tree before inline parsing.
+struct BlockNesting;
+impl CoreRule for BlockNesting {
+    fn run(root: &mut Node, _: &MarkdownIt) {
+        fn limit(node: &mut Node, level: u32) {
+            for child in node.children.iter_mut() {
+                let container = child.is::<Blockquote>() || child.is::<ListItem>();
+                let inner = if container || child.is::<BulletList>() || child.is::<OrderedList>() {
+                    level + 1
+                } else {
+                    level
+                };
+                if container && inner >= MAX_NESTING {
+                    child.children.clear();
+                } else {
+                    limit(child, inner);
+                }
+            }
+        }
+        limit(root, 0);
+    }
+}
+
+const MAX_NESTING: u32 = 20;
+
 /// `re.sub(r'[^\w\s-]', '', content).strip().lower()` then `\s+` → `-`.
 pub fn slug(content: &str) -> String {
     let kept: String = content
@@ -144,6 +175,8 @@ fn unique_slug(slug: &str, used: &mut HashSet<String>) -> String {
 
 fn parser(path: &str, note_prefix: &str) -> MarkdownIt {
     let mut md = MarkdownIt::new();
+    // markdown-it-py's `commonmark` preset uses maxNesting=20 (deeper content is dropped).
+    md.max_nesting = MAX_NESTING;
     markdown_it::plugins::cmark::add(&mut md);
     markdown_it::plugins::html::add(&mut md);
     markdown_it::plugins::extra::tables::add(&mut md);
@@ -152,8 +185,12 @@ fn parser(path: &str, note_prefix: &str) -> MarkdownIt {
     // dispatched by marker character, and the image rule is the only other
     // `!` rule, so running first is equivalent.
     md.inline.add_rule::<WikiImage>().before_all();
-    md.add_rule::<HeadingIds>()
+    md.add_rule::<BlockNesting>()
         .after::<BlockParserRule>()
+        .before::<InlineParserRule>();
+    // Heading ids only for headings that survived the nesting limit.
+    md.add_rule::<HeadingIds>()
+        .after::<BlockNesting>()
         .before::<InlineParserRule>();
     md.ext.insert(WikiContext {
         notebook_prefix: format!("{}/", path.split('/').next().unwrap_or("")),
@@ -167,6 +204,10 @@ pub fn render_body(reader: &Reader, path: &str, body: &str) -> (String, BTreeSet
     let rendered = parser(path, &reader.config.note_prefix)
         .parse(body)
         .render();
+    // markdown-it(-py) writes no newline between an opening tag and its
+    // immediately following closing tag; the Rust renderer does for empty
+    // blockquotes. Normalise that one case so the sanitized DOM is identical.
+    let rendered = rendered.replace("<blockquote>\n</blockquote>", "<blockquote></blockquote>");
     let assets: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     let safe = {
         let (links, page, collected) = (reader.links.clone(), path.to_string(), assets.clone());

@@ -36,8 +36,9 @@ impl Contract {
             serde_json::from_str(CONTRACT_JSON).map_err(|_| "MCP contract is not valid JSON")?;
         let server = serde_json::from_value(raw["initialize"].clone())
             .map_err(|_| "invalid MCP initialize contract")?;
-        let tools = serde_json::from_value(json!({"tools": raw["tools"]}))
-            .map_err(|_| "invalid MCP tool contract")?;
+        let tools =
+            serde_json::from_value(json!({"resultType": "complete", "tools": raw["tools"]}))
+                .map_err(|_| "invalid MCP tool contract")?;
         Ok(Self { server, tools })
     }
 }
@@ -128,15 +129,20 @@ fn search_message(fault: &Fault) -> String {
     }
 }
 
+/// Results carry `resultType: "complete"` (SEP-2322, required by 2026-07-28
+/// clients); rmcp strips it again for peers on handshake-era versions.
+///
 /// `FuncMetadata.convert_result` for a `dict[str, Any]` return value, or the
 /// `isError` result the SDK builds from a `ToolError`.
 pub fn tool_result(outcome: Result<Value, String>) -> CallToolResult {
     let value = match outcome {
         Ok(structured) => {
             let text = serde_json::to_string_pretty(&structured).unwrap_or_default();
-            json!({"content": [{"type": "text", "text": text}], "structuredContent": structured, "isError": false})
+            json!({"resultType": "complete", "content": [{"type": "text", "text": text}], "structuredContent": structured, "isError": false})
         }
-        Err(message) => json!({"content": [{"type": "text", "text": message}], "isError": true}),
+        Err(message) => {
+            json!({"resultType": "complete", "content": [{"type": "text", "text": message}], "isError": true})
+        }
     };
     serde_json::from_value(value).expect("static CallToolResult shape")
 }
@@ -165,12 +171,28 @@ impl ServerHandler for NotesHandler {
         ))
     }
 
+    /// Python: `{"code": -32601, "message": "Method not found", "data": <method>}`.
+    async fn on_custom_request(
+        &self,
+        request: rmcp::model::CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CustomResult, McpError> {
+        Err(McpError::new(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "Method not found",
+            Some(Value::String(request.method.to_string())),
+        ))
+    }
+
     async fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        Ok(serde_json::from_value(json!({"prompts": []})).expect("static shape"))
+        Ok(
+            serde_json::from_value(json!({"resultType": "complete", "prompts": []}))
+                .expect("static shape"),
+        )
     }
 
     async fn list_resources(
@@ -178,7 +200,10 @@ impl ServerHandler for NotesHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(serde_json::from_value(json!({"resources": []})).expect("static shape"))
+        Ok(
+            serde_json::from_value(json!({"resultType": "complete", "resources": []}))
+                .expect("static shape"),
+        )
     }
 
     async fn list_resource_templates(
@@ -186,6 +211,9 @@ impl ServerHandler for NotesHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        Ok(serde_json::from_value(json!({"resourceTemplates": []})).expect("static shape"))
+        Ok(
+            serde_json::from_value(json!({"resultType": "complete", "resourceTemplates": []}))
+                .expect("static shape"),
+        )
     }
 }

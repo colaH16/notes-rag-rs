@@ -40,6 +40,7 @@ impl McpGateway {
     pub fn new(url: &str, token: &str) -> std::result::Result<Self, String> {
         // httpx2.AsyncClient(timeout=40 / 35, trust_env=False); no pooling,
         // because Python created a new client per call as well.
+        crate::install_crypto_provider();
         let client = |timeout: u64| {
             reqwest::Client::builder()
                 .no_proxy()

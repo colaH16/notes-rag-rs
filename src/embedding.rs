@@ -73,6 +73,7 @@ impl EmbeddingClient {
             return Err("invalid request timeout".into());
         }
         let endpoint = format!("{}/embeddings", base_url.trim_end_matches('/'));
+        crate::install_crypto_provider();
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

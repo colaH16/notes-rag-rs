@@ -223,7 +223,10 @@ mod tests {
         );
         assert_eq!(dumps_ascii(&json!(["\u{1F600}"])), "[\"\\ud83d\\ude00\"]");
         assert_eq!(dumps_ascii(&json!(["\u{7f}\u{1}"])), "[\"\\u007f\\u0001\"]");
-        assert_eq!(dumps_unicode(&json!(["\u{7f}\u{1}"])), "[\"\u{7f}\\u0001\"]");
+        assert_eq!(
+            dumps_unicode(&json!(["\u{7f}\u{1}"])),
+            "[\"\u{7f}\\u0001\"]"
+        );
     }
 
     #[test]

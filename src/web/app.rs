@@ -84,7 +84,7 @@ impl WebApp {
         reader: Option<Arc<Reader>>,
         citation_prefix: String,
         note_prefix: String,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Self> {
         if auth.is_some() != owner_gateway.is_some() {
             return Err(Fault::Value(
                 "Owner login and gateway must be configured together",
@@ -96,7 +96,7 @@ impl WebApp {
             }
             state.activate_policy(revision)?;
         }
-        Ok(Arc::new(Self {
+        Ok(Self {
             state,
             gateway,
             owner_gateway,
@@ -109,7 +109,7 @@ impl WebApp {
             lock: tokio::sync::Mutex::new(()),
             folder_lock: tokio::sync::Mutex::new(()),
             catalogs: Mutex::new(HashMap::new()),
-        }))
+        })
     }
 
     // ----- shared helpers -------------------------------------------------

@@ -88,7 +88,8 @@ pub struct McpConfig {
     pub allowlist: PathBuf,
     pub access_policy: PathBuf,
     pub corpus_root: PathBuf,
-    pub database_url: String,
+    /// libpq `PG*` variables overridden by a non-empty `RAG_DATABASE_URL`.
+    pub database: crate::search::conninfo::Options,
     pub litellm_base_url: String,
     pub litellm_api_key: String,
     pub allow_internal_http: bool,
@@ -115,7 +116,7 @@ impl McpConfig {
             allowlist: env.required("RAG_ALLOWLIST")?.into(),
             access_policy: env.required("RAG_ACCESS_POLICY")?.into(),
             corpus_root: env.required("RAG_CORPUS_ROOT")?.into(),
-            database_url: env.or("RAG_DATABASE_URL", ""),
+            database: crate::search::conninfo::resolve(env)?,
             litellm_base_url: env.required("RAG_LITELLM_BASE_URL")?,
             litellm_api_key: env.required("RAG_LITELLM_API_KEY")?,
             allow_internal_http: env.get("RAG_ALLOW_INTERNAL_HTTP") == Some("true"),
@@ -275,5 +276,30 @@ mod tests {
                 .allowed_hosts,
             [""]
         );
+    }
+
+    #[test]
+    fn mcp_database_comes_from_pg_environment_without_url() {
+        let mut pairs = vec![
+            ("RAG_MCP_TOKEN", "t"),
+            ("RAG_ALLOWLIST", "/s/markdown.json"),
+            ("RAG_ACCESS_POLICY", "/p.json"),
+            ("RAG_CORPUS_ROOT", "/c"),
+            ("RAG_LITELLM_BASE_URL", "http://x"),
+            ("RAG_LITELLM_API_KEY", "k"),
+            ("RAG_SILVERBULLET_URL", "https://n"),
+            ("PGHOST", "pg.internal"),
+            ("PGUSER", "reader"),
+            ("PGSSLMODE", "verify-full"),
+        ];
+        let config = McpConfig::from_env(&env(&pairs)).ok().unwrap();
+        assert_eq!(config.database.get("host"), Some("pg.internal"));
+        assert_eq!(config.database.get("sslmode"), Some("verify-full"));
+        pairs.push(("RAG_DATABASE_URL", "postgresql://other/rag"));
+        let config = McpConfig::from_env(&env(&pairs)).ok().unwrap();
+        assert_eq!(config.database.get("host"), Some("other"));
+        assert_eq!(config.database.get("sslmode"), Some("verify-full"));
+        pairs.push(("PGTZ", "UTC"));
+        assert!(McpConfig::from_env(&env(&pairs)).is_err());
     }
 }

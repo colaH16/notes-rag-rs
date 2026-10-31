@@ -36,7 +36,7 @@ async fn services(
     let scope = scope_signature(&allowlist.ids);
     let generation = manifest.config_signature();
     let tokenizer = Arc::new(QwenTokenizer::load(&config.tokenizer_path, manifest)?);
-    let database = crate::search::db::Database::from_dsn(&config.database_url)?;
+    let database = crate::search::db::Database::from_options(&config.database)?;
     let (public_ids, public_revision) =
         load_public_notebooks(&config.access_policy, &allowlist.ids)
             .map_err(|e| format!("access policy: {e}"))?;
@@ -128,7 +128,14 @@ pub fn gate(
     owner: Option<Arc<dyn Retrieval>>,
     shutdown: CancellationToken,
 ) -> Result<Arc<Gate>, String> {
-    build_gate(&config.token, config.owner_token.as_deref(), config.allowed_hosts.clone(), public, owner, shutdown)
+    build_gate(
+        &config.token,
+        config.owner_token.as_deref(),
+        config.allowed_hosts.clone(),
+        public,
+        owner,
+        shutdown,
+    )
 }
 
 /// The MCP HTTP surface for any retrieval implementation (tests use mocks).
