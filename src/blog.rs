@@ -66,6 +66,7 @@ struct Catalog {
 pub struct Source {
     base: String,
     http: reqwest::Client,
+    token: Option<String>,
 }
 impl Source {
     pub fn new(base: &str) -> Result<Self> {
@@ -82,30 +83,44 @@ impl Source {
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(1500))
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| error())?;
         Ok(Self {
             base: base.trim_end_matches('/').into(),
             http,
+            token: None,
         })
     }
     pub fn from_env() -> Result<Option<Self>> {
         match std::env::var("RAG_WORDPRESS_API") {
-            Ok(v) if !v.is_empty() => Self::new(&v).map(Some),
+            Ok(v) if !v.is_empty() => {
+                let mut source = Self::new(&v)?;
+                source.token = std::env::var("RAG_WORDPRESS_TOKEN")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                Ok(Some(source))
+            }
             _ => Ok(None),
         }
     }
     async fn get(&self, path: &str, limit: usize) -> Result<Value> {
-        let mut response = self
+        let mut request = self
             .http
             .get(format!("{}{path}", self.base))
             .header("Host", "cola16.app")
             .header("X-Forwarded-Proto", "https")
             .header("Cache-Control", "no-cache")
-            .send()
-            .await
-            .map_err(|_| error())?;
+            .timeout(if path == "/catalog" {
+                Duration::from_secs(3)
+            } else {
+                Duration::from_secs(10)
+            });
+        if let Some(token) = &self.token {
+            request = request.header("X-Cola-RAG-Token", token);
+        }
+        let mut response = request.send().await.map_err(|_| error())?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(Fault::NotReadable);
         }
@@ -140,7 +155,7 @@ impl Source {
             return Err(Fault::NotReadable);
         }
         let p: Post =
-            serde_json::from_value(self.get(&format!("/posts/{id}"), 5 * 1024 * 1024).await?)
+            serde_json::from_value(self.get(&format!("/posts/{id}"), 9 * 1024 * 1024).await?)
                 .map_err(|_| error())?;
         if p.id != id
             || !p.valid()
@@ -170,6 +185,23 @@ impl Store {
             source,
             database,
             signature,
+        }
+    }
+    pub async fn revision(&self) -> Result<String> {
+        let client = self.database.connect().await?;
+        let row=client.query_opt("SELECT config_signature,updated_at::text FROM notes_rag.blog_generation WHERE singleton",&[]).await.map_err(db)?;
+        match row {
+            None => Ok("empty".into()),
+            Some(row) => {
+                if row.get::<_, String>(0) != self.signature {
+                    return Err(error());
+                }
+                Ok(crate::py::sha256_hex(format!(
+                    "{}:{}",
+                    self.signature,
+                    row.get::<_, String>(1)
+                )))
+            }
         }
     }
     pub async fn search(
@@ -246,7 +278,6 @@ impl Store {
         Ok((results, ids.len()))
     }
     pub async fn chunk(&self, key: &str, ordinal: i64) -> Result<Option<Value>> {
-        let catalog = self.source.catalog().await?;
         let client = self.database.connect().await?;
         client.batch_execute("BEGIN; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'").await.map_err(db)?;
         let generation = client
@@ -263,6 +294,8 @@ impl Store {
         let Some(row) = rows.first() else {
             return Ok(None);
         };
+        client.batch_execute("COMMIT").await.map_err(db)?;
+        let catalog = self.source.catalog().await?;
         let id: i64 = row.get("id");
         if !catalog.get(&id).is_some_and(|p| {
             p.revision == row.get::<_, String>("revision") && p.url == row.get::<_, String>("url")
@@ -324,6 +357,15 @@ fn render_page(post: &Post) -> String {
                 {
                     return None;
                 }
+                if tag == "img" {
+                    let path = crate::py::url::unquote(u.path());
+                    if path.split('/').any(|s| s == ".." || s == ".")
+                        || path.contains('\\')
+                        || path.chars().any(char::is_control)
+                    {
+                        return None;
+                    }
+                }
                 return Some(Cow::Owned(u.to_string()));
             }
             Some(Cow::Borrowed(value))
@@ -374,14 +416,25 @@ pub fn merge(mut notes: Vec<Value>, blog: Vec<Value>, limit: usize) -> Vec<Value
         fallback(a)
             .cmp(&fallback(b))
             .then_with(|| {
-                b["similarity"]
+                b["__rank_similarity"]
                     .as_f64()
+                    .or_else(|| b["similarity"].as_f64())
                     .unwrap_or(0.)
-                    .total_cmp(&a["similarity"].as_f64().unwrap_or(0.))
+                    .total_cmp(
+                        &a["__rank_similarity"]
+                            .as_f64()
+                            .or_else(|| a["similarity"].as_f64())
+                            .unwrap_or(0.),
+                    )
             })
             .then_with(|| a["page_key"].as_str().cmp(&b["page_key"].as_str()))
     });
     notes.truncate(limit);
+    for row in &mut notes {
+        if let Some(object) = row.as_object_mut() {
+            object.remove("__rank_similarity");
+        }
+    }
     notes
 }
 

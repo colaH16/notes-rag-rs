@@ -83,7 +83,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         headers.insert(name, HeaderValue::from_static(value));
     }
     if blog_preview {
-        headers.insert(header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'none'; script-src 'self' https://apps.cola16.app; style-src 'self'; connect-src 'self' https://apps.cola16.app; img-src 'self' https://cola16.app; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
+        headers.insert(header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'none'; script-src 'self' https://apps.cola16.app; style-src 'self'; connect-src 'self' https://apps.cola16.app; img-src 'self' https://cola16.app/wp-content/uploads/; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     }
     response
 }

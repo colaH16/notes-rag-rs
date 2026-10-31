@@ -63,6 +63,7 @@ pub struct WebApp {
     pub note_prefix: String,
     pub cache_version: String,
     pub blog: Option<crate::blog::Source>,
+    pub catalog_ttl: Duration,
     lock: tokio::sync::Mutex<()>,
     folder_lock: tokio::sync::Mutex<()>,
     catalogs: Mutex<HashMap<Audience, (Value, Instant)>>,
@@ -108,6 +109,7 @@ impl WebApp {
             note_prefix,
             cache_version: SEARCH_CACHE_VERSION.into(),
             blog: None,
+            catalog_ttl: Duration::from_secs(60),
             lock: tokio::sync::Mutex::new(()),
             folder_lock: tokio::sync::Mutex::new(()),
             catalogs: Mutex::new(HashMap::new()),
@@ -270,7 +272,7 @@ impl WebApp {
             .unwrap_or_else(|e| e.into_inner())
             .insert(
                 selected.audience,
-                (catalog.clone(), Instant::now() + Duration::from_secs(60)),
+                (catalog.clone(), Instant::now() + self.catalog_ttl),
             );
         Ok(catalog)
     }
@@ -460,6 +462,19 @@ impl WebApp {
                 ));
             }
         }
+        let blog_revision = if self.blog.is_some() && folder.is_empty() {
+            match tokio::time::timeout(Duration::from_secs(2), self.catalog(&selected)).await {
+                Ok(Ok(catalog)) => catalog.get("blog_index_revision").cloned(),
+                _ => self
+                    .catalogs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&audience)
+                    .and_then(|(catalog, _)| catalog.get("blog_index_revision").cloned()),
+            }
+        } else {
+            None
+        };
         let key_material = json!([
             self.cache_version,
             audience.name(),
@@ -468,6 +483,11 @@ impl WebApp {
             history,
             folder,
         ]);
+        let key_material = if self.blog.is_some() {
+            json!([key_material, blog_revision])
+        } else {
+            key_material
+        };
         let key = sha256_hex(pyjson::dumps_unicode(&key_material));
         let state = self.state.clone();
         let lookup = key.clone();
@@ -524,7 +544,9 @@ impl WebApp {
         }
         let state = self.state.clone();
         let saved = result.clone();
-        self.blocking(move || state.save(&key, &saved)).await?;
+        if result.get("blog_unavailable").and_then(Value::as_bool) != Some(true) {
+            self.blocking(move || state.save(&key, &saved)).await?;
+        }
         Ok(http::json(StatusCode::OK, &with_flag(result, false)))
     }
 
@@ -990,6 +1012,11 @@ pub fn public_folders(result: &Map<String, Value>) -> Result<Map<String, Value>>
     let mut out = Map::new();
     out.insert("folders".into(), safe.into());
     out.insert("indexed_pages".into(), indexed.into());
+    if let Some(revision) = result.get("blog_index_revision").and_then(Value::as_str)
+        && (crate::blog::valid_revision(revision) || matches!(revision, "empty" | "unavailable"))
+    {
+        out.insert("blog_index_revision".into(), revision.into());
+    }
     Ok(out)
 }
 

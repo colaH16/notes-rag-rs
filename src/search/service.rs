@@ -286,7 +286,12 @@ impl SearchService {
                             let n = info.get(key).and_then(Value::as_i64).unwrap_or(0);
                             info.insert(key.into(), (n + count as i64).into());
                         }
-                        results = crate::blog::merge(results, hits, request.limit as usize);
+                        if !hits.is_empty() {
+                            for (item, row) in results.iter_mut().zip(rows.iter()) {
+                                item["__rank_similarity"] = row.similarity.unwrap_or(0.).into();
+                            }
+                            results = crate::blog::merge(results, hits, request.limit as usize);
+                        }
                     }
                     Err(_) => blog_unavailable = true,
                 }
@@ -307,8 +312,18 @@ impl SearchService {
 
     /// `folders()`: catalog only, no embedding call.
     pub async fn folders(&self) -> Result<Value> {
-        self.bounded(|state| async move { state.store.folders().await })
-            .await
+        self.bounded(|state| async move {
+            let mut folders = state.store.folders().await?;
+            if let Some(blog) = &state.blog {
+                folders["blog_index_revision"] = blog
+                    .revision()
+                    .await
+                    .unwrap_or_else(|_| "unavailable".into())
+                    .into();
+            }
+            Ok(folders)
+        })
+        .await
     }
 
     /// `graph()`: cached semantic graph, re-filtered for live visibility.
@@ -355,7 +370,7 @@ impl SearchService {
             }
             if row.is_none()
                 && let Some(blog) = &this.blog
-                && let Some(result) = blog.chunk(&page_key, ordinal).await?
+                && let Ok(Some(result)) = blog.chunk(&page_key, ordinal).await
             {
                 return Ok(json!({"index":info.to_json(),"result":result}));
             }

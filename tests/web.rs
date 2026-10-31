@@ -1128,3 +1128,72 @@ async fn wordpress_preview_and_cached_excerpts_recheck_public_revisions() {
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn wordpress_outage_response_is_not_cached_for_three_hours() {
+    let fixture = Fixture::new();
+    fixture
+        .gateway
+        .search_result
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()["blog_unavailable"] = true.into();
+    let app = fixture.default_app();
+    for _ in 0..2 {
+        let response = post_json(&app, "/api/search", &json!({"query":"outage"}), &[]).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.json()["cached"], false);
+        assert_eq!(response.json()["blog_unavailable"], true);
+    }
+    assert_eq!(fixture.gateway.searches(), 2);
+}
+
+#[tokio::test]
+async fn blog_index_revision_invalidates_results_without_resetting_usage() {
+    notes_rag_rs::install_crypto_provider();
+    let fixture = Fixture::new();
+    *fixture.gateway.folders_result.lock().unwrap() =
+        Some(json!({"folders":[],"indexed_pages":1,"blog_index_revision":"a".repeat(64)}));
+    let mut app = WebApp::new(
+        fixture.state.clone(),
+        fixture.gateway.clone(),
+        None,
+        None,
+        None,
+        None,
+        PREFIX.into(),
+        NOTE_PREFIX.into(),
+    )
+    .unwrap();
+    app.blog = Some(notes_rag_rs::blog::Source::new("http://127.0.0.1:1").unwrap());
+    app.catalog_ttl = std::time::Duration::ZERO;
+    let app = router(Arc::new(app));
+    assert_eq!(
+        post_json(&app, "/api/search", &json!({"query":"revision"}), &[])
+            .await
+            .json()["cached"],
+        false
+    );
+    assert_eq!(
+        post_json(&app, "/api/search", &json!({"query":"revision"}), &[])
+            .await
+            .json()["cached"],
+        true
+    );
+    *fixture.gateway.folders_result.lock().unwrap() =
+        Some(json!({"folders":[],"indexed_pages":1,"blog_index_revision":"b".repeat(64)}));
+    assert_eq!(
+        post_json(&app, "/api/search", &json!({"query":"revision"}), &[])
+            .await
+            .json()["cached"],
+        false
+    );
+    assert_eq!(fixture.gateway.searches(), 2);
+    assert_eq!(
+        post_json(&app, "/api/search", &json!({"query":"different"}), &[])
+            .await
+            .status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
