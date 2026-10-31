@@ -322,6 +322,7 @@ async fn static_pages_and_no_public_mcp_proxy() {
         "/cola-theme.css",
         "/cola-theme-init.js",
         "/cola-theme.js",
+        "/cola-header.css",
     ] {
         let response = get(&app, path, &[]).await;
         assert_eq!(response.status, StatusCode::OK, "{path}");
@@ -424,6 +425,68 @@ async fn folder_browser_has_native_buttons_and_no_dropdown() {
         css.contains("repeat(3,minmax(0,1fr))")
             && css.contains(".folder-column-current{display:block}")
     );
+}
+
+/// The shared `<cola-header>` contract: one header before `<main>`, the provider
+/// script loaded async with only a local fallback stylesheet, and the page's
+/// account controls (if any) in `slot="account"`. Returns the `<main>` markup.
+fn shared_header(html: &str, current: &str) -> String {
+    assert_eq!(html.matches("<cola-header ").count(), 1);
+    assert!(html.contains(&format!("<cola-header current=\"{current}\" ")));
+    assert!(html.contains(
+        "<script src=\"https://apps.cola16.app/branding/v1/cola-header.js\" async></script>"
+    ));
+    assert!(html.contains("<link rel=\"stylesheet\" href=\"/cola-header.css\">"));
+    for link in html.split("<link ").skip(1) {
+        assert!(link.contains("href=\"/"), "cross-origin stylesheet: {link}");
+    }
+    for old in [
+        "cola-spaces",
+        "data-cola-theme-select",
+        "cola-skip",
+        "지식 지도",
+        "검색으로 돌아가기",
+    ] {
+        assert!(!html.contains(old), "{old}");
+    }
+    let (header, main) = html.split_once("</cola-header>").unwrap();
+    assert_eq!(header.matches(" aria-current=\"page\"").count(), 1);
+    let main = main.trim_start();
+    assert!(main.starts_with("<main id=\"main\">"));
+    main.to_string()
+}
+
+#[tokio::test]
+async fn search_and_graph_share_the_cola_header() {
+    let f = Fixture::new();
+    let app = f.default_app();
+    for (path, current, badge, login) in [
+        ("/", "notes", "id=\"access-badge\"", "href=\"/auth/login\""),
+        (
+            "/graph",
+            "graph",
+            "id=\"audience\"",
+            "href=\"/auth/login?next=/graph\"",
+        ),
+    ] {
+        let html = get(&app, path, &[]).await.text();
+        let main = shared_header(&html, current);
+        // Library access is page content; login/logout stay host-owned in the account slot.
+        assert!(main.contains(badge) && !html.split("<main").next().unwrap().contains(badge));
+        let account = html
+            .split("<div slot=\"account\" class=\"cola-account\">")
+            .nth(1)
+            .unwrap()
+            .split("</div>")
+            .next()
+            .unwrap();
+        assert!(account.contains(&format!("<a id=\"login\" {login} hidden>")));
+        assert!(account.contains("<button id=\"logout\" type=\"button\" hidden>로그아웃</button>"));
+    }
+    let init = get(&app, "/cola-theme-init.js", &[]).await.text();
+    assert!(init.contains("'#191719':'#F4F0F1'"));
+    let theme = get(&app, "/cola-theme.js", &[]).await.text();
+    assert!(theme.contains("cola-theme-change") && !theme.contains("select"));
 }
 
 #[tokio::test]
@@ -766,6 +829,12 @@ async fn reader_routes_headers_and_no_writes() {
             .contains("<pre><code class=\"language-fish\"># comment")
     );
     assert!(!result.text().contains("<script>title"));
+    // The reader has no account controls; its back/audience/edit links sit by the article.
+    let main = shared_header(&result.text(), "notes");
+    assert!(!result.text().contains("slot=\"account\""));
+    assert!(main.starts_with(
+        "<main id=\"main\"><div class=\"reader-tools\"><a href=\"/\">← 노트 검색</a>\n<span>PUBLIC · 읽기 전용</span>"
+    ));
     corpus.note(
         "public/note.md",
         "public",

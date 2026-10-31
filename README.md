@@ -39,7 +39,8 @@ MCP 검색 6,000쌍과 웹 검색 870쌍의 측정 응답이 모두 일치했고
 | MCP 서버 (`mcp_server.py`, `search.py`) | `search_notes`, `list_note_folders`, `get_note_chunk` | – |
 | 질의 임베딩 (`embedding_client.py`의 질의 경로) | 1회 시도, 30초, 쿨다운 공유 | – |
 | 색인기, 청커, 세그멘터, OCR, 백업, 알림, 모니터, 스냅샷, 잡 | **이전하지 않음** | 원본 이미지/CronJob 그대로 |
-| 프론트엔드 JS/CSS/HTML, 브라우저 Barnes-Hut 워커 | 바이트 단위로 동일하게 내장 (`static/`, SHA-256 검사) | 원본이 정본 |
+| 프론트엔드 JS, 브라우저 Barnes-Hut 워커 | 바이트 단위로 동일하게 내장 (`static/`, SHA-256 검사) | 원본이 정본 |
+| 페이지 HTML/CSS, 테마 파일 | cola16 공통 헤더와 V7 플럼 색으로 **의도적으로 변경** (§9, SHA-256 고정) | 원본 화면은 이전 기록 |
 | PostgreSQL/pgvector 스키마, 내용, PVC | **변경하지 않음** (마이그레이션 없음) | 원본 DDL이 정본 |
 
 **이미지 교체 범위:** 이 이미지는 기존 **web Deployment와 MCP Deployment만** 대체할 수 있습니다.
@@ -49,14 +50,14 @@ MCP 검색 6,000쌍과 웹 검색 870쌍의 측정 응답이 모두 일치했고
 
 - 원본: 같은 소유자(colaH16)의 Python 저장소 `notes-rag`, 커밋 `754a97398ac1d6ef313605f84eb7249db8eb556e`.
 - 원본 저장소에는 **라이선스 파일이 없습니다.** 따라서 이 포트에도 라이선스를 새로 붙이지 않았으며(`Cargo.toml`에 license 없음), 권리는 원저작자에게 있습니다.
-- `static/`의 프론트엔드 파일 12개와 `src/reader/page.html`(원문 보기 HTML 틀)은 원본에서 그대로 가져왔습니다. `compat/static-assets.sha256`과 테스트가 원본과 바이트 단위로 같은지 확인합니다.
+- `static/`의 프론트엔드 파일과 `src/reader/page.html`(원문 보기 HTML 틀)은 원본에서 가져왔습니다. 검색·지도·원문 보기 JS(`public_search.js`, `graph.js`, `graph-layout.js`, `reader.js`)는 지금도 원본과 바이트 단위로 같습니다. 페이지 HTML/CSS·테마 파일·원문 보기 틀은 2026-10-31 승인에 따라 공통 헤더로 바꿨고(§9), `static/cola-header.css`는 KubeShelf가 만든 공통 헤더 대체 CSS의 사본입니다. `compat/static-assets.sha256`이 두 묶음을 나눠 모든 내장 파일의 해시를 고정하고, 테스트가 확인합니다.
 - `tests/fixtures/python-schema/*.sql`은 테스트용 임시 DB를 만들 때만 쓰는 원본 DDL 사본입니다(출처는 `SOURCE.txt`).
 - 의존 크레이트는 각자의 라이선스를 따릅니다(대부분 MIT/Apache-2.0). 특히 HTML 정제기 `ammonia`(MIT/Apache-2.0)는 원본이 쓰던 Python `nh3`의 내부 엔진과 같은 라이브러리입니다.
 
 ## 3. 구조
 
 ```
-                 브라우저 (원본 JS/CSS 그대로)
+                 브라우저 (원본 JS + cola16 공통 헤더)
                         │ HTTPS (ingress)
               ┌─────────▼──────────┐   SQLite (/state/search.db, 기존 스키마)
               │ RAG_ROLE=web       │── 예산·트래픽·캐시·소유자 세션
@@ -190,7 +191,7 @@ DB 스키마는 바꾸지 않습니다. Rust는 DDL을 실행하지 않으며 �
 - 공개/소유자 분리: 소유자는 고정 issuer+subject의 서버 측 세션뿐입니다. 메일, 사용자 이름, 헤더, 클라이언트 플래그는 믿지 않습니다. 느린 작업 뒤에 세션을 다시 확인해 로그아웃된 사용자에게 소유자 결과를 주지 않습니다(409).
 - OIDC: state(상수 시간 비교), nonce, PKCE S256, 서명(비대칭 알고리즘만, 클라이언트 비밀을 HMAC 키로 쓰지 않음), issuer, audience, 만료(30초 여유), `at_hash`(있을 때), `nonce_supported=false` 거부, 흐름 1회 사용, 키 교체 시 메타데이터 1회 재조회.
 - CSRF/Origin: 소유자 검색과 로그아웃은 정확한 Origin을 요구합니다. `Sec-Fetch-Site: cross-site`를 거부합니다. 쿠키는 `__Host-`, Secure, HttpOnly, SameSite=Lax입니다.
-- 응답 헤더: 모든 응답에 `Cache-Control: no-store`, `nosniff`, `no-referrer`, `noindex`, 원본과 같은 CSP.
+- 응답 헤더: 모든 응답에 `Cache-Control: no-store`, `nosniff`, `no-referrer`, `noindex`, CSP. CSP는 원본에 공통 헤더 공급자 `https://apps.cola16.app`을 `script-src`·`connect-src`에만 더한 것입니다. `default-src 'none'`, `style-src 'self'`(인라인 허용 없음), `worker-src 'self'`, `frame-ancestors 'none'`, `form-action 'self'`는 그대로입니다.
 - MCP: Bearer 정확히 1개(상수 시간 비교), Host 허용 목록(421), 브라우저 Origin 거부(403), POST Content-Type(400), 32 KiB(413).
 - 파일: 루트부터 모든 경로 요소를 `O_NOFOLLOW`로 `openat`하고, 마지막 fd를 `fstat`한 뒤 **그 fd를 그대로** 읽거나 스트리밍합니다. 경로를 다시 열지 않으므로 심볼릭 링크 교체나 이름 바꾸기(TOCTOU)로 다른 파일을 내줄 수 없습니다. 요청마다 선택/정책 파일을 다시 읽고 리비전이 다르면 실패로 닫습니다.
 - Markdown: 원본과 같은 태그·속성 허용 목록, 같은 링크/첨부 재작성, 같은 정제 엔진. 외부 이미지는 넣지 않고, 다른 노트북의 첨부는 허용하지 않습니다.
@@ -219,6 +220,16 @@ DB 스키마는 바꾸지 않습니다. Rust는 DDL을 실행하지 않으며 �
 | 잘못된 JSON-RPC 본문(배치 등) | 400, -32602, pydantic 오류 문장 | 400, -32602, 고정 문장 |
 | 쿨다운 공유(`RAG_ALERT_DIR`) | 파일 잠금 + 원자적 교체 | 같은 파일 형식·잠금으로 구현, Python 잡과의 동시 실행은 시험하지 않음 |
 
+### 화면: cola16 공통 헤더 (2026-10-31)
+
+검색(`/`), 노트 지도(`/graph`), 원문 보기(`/read`)는 원본의 상단 막대·테마 선택·`cola-spaces` 메뉴 대신 공통 `<cola-header>` 하나를 씁니다. 왼쪽 로고, 가운데 공통 메뉴 다섯 개, 오른쪽 테마 버튼(자동→라이트→다크)과 기존 로그인/로그아웃입니다. 계약은 KubeShelf 저장소의 `docs/cola16-navigation.md`입니다. 백엔드(검색·인증·세션·요청 한도·ACL·색인·MCP·Markdown 정제)는 바뀌지 않았습니다.
+
+- 스크립트 `https://apps.cola16.app/branding/v1/cola-header.js`는 `async`로 읽어 첫 화면을 막지 않습니다. 헤더는 Shadow DOM에 그리므로 페이지 CSS가 글꼴·간격을 바꾸지 못하고, 메뉴 JSON은 쿠키 없이 읽습니다. 계정·세션 정보는 공급자로 보내지 않습니다.
+- `#login`/`#logout`은 light DOM의 `slot="account"`에 있어 기존 JS가 그대로 찾고 동작합니다. `PUBLIC LIBRARY`/`OWNER` 표시(`#access-badge`, `#audience`)와 원문 보기의 돌아가기·접근 표시·편집 링크는 헤더 아래 `<main>` 안으로 옮겼습니다. 중복이던 `지식 지도 ↗`와 `검색으로 돌아가기 ↗`는 공통 메뉴의 `노트 지도`/`노트 검색`으로 대체했습니다.
+- JavaScript가 없거나 공급자가 응답하지 않으면 같은 출처의 `/cola-header.css`와 페이지 안의 기본 링크가 보입니다. 이 사본은 마지막으로 맞춘 시점의 것이며, 맞출 때만 KubeShelf에서 `npm --prefix web run build` 뒤 `python3 -I scripts/vendor-header-css.py <kubeshelf-rs>/web/dist/branding/v1/cola-header.css`를 실행하고 `compat/static-assets.sha256`을 갱신합니다. 테스트가 사본 머리말의 원본 해시와 `cola-header:not(:defined)` 범위를 확인합니다.
+- 색은 `cola-theme.css`의 V7 플럼(다크·라이트 역할 전체)입니다. 지도 노트북 색과 의미는 그대로입니다.
+- 알려진 제약: 공통 헤더는 생성한 스타일시트(`adoptedStyleSheets`)를 쓰므로 `style-src 'self'`에서도 스타일이 적용됩니다. 이를 지원하지 않는 오래된 브라우저(예: Safari 16.4 미만)에서는 헤더가 Shadow DOM 안에 `<style>`을 넣고, CSP가 이를 막아 헤더가 스타일 없이 보일 수 있습니다. CSP를 넓히지 않았습니다.
+
 ## 10. 시험 방법과 결과
 
 아래 표는 로컬 검증 결과이며, 재현용 Python 비교 도구는 `tests/oracle/`에 있습니다.
@@ -245,7 +256,7 @@ python -I tests/oracle/dump_mcp_contract.py <python-src>      # 계약 재캡처
 | 원본 Python 시험(고정 커밋 사본, 오라클 venv, 같은 격리 DB) | 428개 통과 — 오라클 환경 자체가 원본과 같게 동작함을 확인 |
 | 함수 단위 차이 시험 `compare.py` | **398개 사례 중 불일치 0**, 문서화한 의도적 차이 2 (front matter `NaN`, 20단계 넘는 `[` 중첩). Markdown/XSS 본문 54종(일부는 두 경로), Unicode `\w`/`isspace`/소문자/casefold 12,410개 코드포인트(CPython 3.13 기준), 토크나이저 개수, 인용 URL, 문맥 확장, 서명 등 |
 | E2E `e2e.py` | **101개 점검 중 100개 동일**, 남은 1건은 문서화한 `GET /mcp` SSE 차이. Python 색인기가 합성 코퍼스 8쪽/17청크를 실제로 커밋한 DB에서 수행. 원본 Python 색인기가 쓴 세대 서명 = 매니페스트, MCP 원시 HTTP/JSON-RPC 경계 사례와 도구 결과 전체, 공식 Python SDK `legacy`/`auto`(2026-07-28) × 공개/소유자, 웹 공개 API 32종, Rust web → Python MCP 혼합 구성, 임베딩 요청이 질문 1개 + ZDR 설정만 보내는지 |
-| 브라우저(Chromium + Playwright, 1280/390px) | 원본 프런트엔드가 Rust web에서 검색·원문 보기·지도(워커 레이아웃)까지 Python web과 같은 결과, CSP 위반·스크립트 오류 없음, 가로 넘침 없음. 1280px에서 콘솔 404 한 건이 Python web에서도 똑같이 나타남(브라우저가 자동 요청하는 `/favicon.ico`로 보이며, 두 구현 모두 해당 경로가 없음) |
+| 브라우저(Chromium + Playwright, 1280/390px, 공통 헤더 적용 전) | 원본 프런트엔드가 Rust web에서 검색·원문 보기·지도(워커 레이아웃)까지 Python web과 같은 결과, CSP 위반·스크립트 오류 없음, 가로 넘침 없음. 1280px에서 콘솔 404 한 건이 Python web에서도 똑같이 나타남(브라우저가 자동 요청하는 `/favicon.ico`로 보이며, 두 구현 모두 해당 경로가 없음) |
 | 릴리스 바이너리 | 20.9 MB, glibc ≤ 2.34 심볼만 사용 |
 
 **추가 확인 범위:** 실제 사용자의 로그인 완료·기존 브라우저 쿠키 재사용, Open WebUI 자체, 운영 부하·지연입니다. CI·두 아키텍처의 이미지 실행·운영 DB/TLS·실제 검색·문서 보기 검증은 [운영 기록](docs/operations.md)에 추가했습니다.

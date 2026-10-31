@@ -1,4 +1,6 @@
-// Real-browser smoke of the unchanged frontend against a running web role.
+// Real-browser smoke of the frontend against a running web role. Search, reader and graph
+// behaviour must match Python; the shared cola16 header provider (README §9) may be offline
+// here, so its requests are left out of the problem list (the page must work without it).
 // node tests/oracle/browser.js <playwright-core dir> <base-url> <out.json>
 // Requires FONTCONFIG_FILE and CHROMIUM (path) in the environment.
 // Synthetic corpus only (see tests/oracle/e2e.py).
@@ -11,10 +13,11 @@ async function page(browser, width) {
   const context = await browser.newContext({ viewport: { width, height: 900 } });
   const tab = await context.newPage();
   const problems = [];
-  tab.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`${m.type()}: ${m.text()}`); });
+  const provider = (url) => { try { return new URL(url).origin === 'https://apps.cola16.app'; } catch { return false; } };
+  tab.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !provider(m.location().url)) problems.push(`${m.type()}: ${m.text()}`); });
   tab.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-  tab.on('requestfailed', (r) => problems.push(`requestfailed: ${new URL(r.url()).pathname}`));
-  tab.on('response', (r) => { if (r.status() >= 400) problems.push(`http ${r.status()}: ${new URL(r.url()).pathname}`); });
+  tab.on('requestfailed', (r) => { if (!provider(r.url())) problems.push(`requestfailed: ${new URL(r.url()).pathname}`); });
+  tab.on('response', (r) => { if (r.status() >= 400 && !provider(r.url())) problems.push(`http ${r.status()}: ${new URL(r.url()).pathname}`); });
   return { context, tab, problems };
 }
 

@@ -1,6 +1,6 @@
 //! Starlette response/cookie behaviour the original relied on, the security
-//! header middleware, the embedded (byte-identical) frontend assets and the
-//! fd-backed attachment response.
+//! header middleware, the embedded frontend assets and the fd-backed attachment
+//! response.
 
 use crate::reader::anchor::OpenedFile;
 use axum::body::Body;
@@ -10,7 +10,10 @@ use axum::response::Response;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use serde_json::Value;
 
-pub const CSP: &str = "default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+/// The original policy plus the shared cola16 header provider: its script and
+/// its public `navigation.json` (fetched without credentials). Styles stay `'self'`;
+/// the header adopts a constructed stylesheet, and its no-JS fallback is `/cola-header.css`.
+pub const CSP: &str = "default-src 'none'; script-src 'self' https://apps.cola16.app; worker-src 'self'; style-src 'self'; connect-src 'self' https://apps.cola16.app; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 fn with_type(status: StatusCode, content_type: &'static str, body: impl Into<Body>) -> Response {
     let mut response = Response::new(body.into());
@@ -132,8 +135,9 @@ pub fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// One embedded frontend file, byte-identical to the pinned Python commit
-/// (checked against `compat/static-assets.sha256` in tests).
+/// One embedded frontend file, pinned by `compat/static-assets.sha256` (checked in
+/// tests). The page UI files listed there under `changed` intentionally diverge
+/// from the pinned Python commit; the others are byte-identical to it.
 pub struct Asset {
     pub name: &'static str,
     pub media_type: &'static str,
@@ -150,7 +154,7 @@ macro_rules! asset {
     };
 }
 
-pub const ASSETS: [Asset; 12] = [
+pub const ASSETS: [Asset; 13] = [
     asset!("public_search.html", "text/html; charset=utf-8"),
     asset!("public_search.js", "application/javascript"),
     asset!("public_search.css", "text/css; charset=utf-8"),
@@ -163,6 +167,7 @@ pub const ASSETS: [Asset; 12] = [
     asset!("cola-theme.css", "text/css; charset=utf-8"),
     asset!("cola-theme-init.js", "application/javascript"),
     asset!("cola-theme.js", "application/javascript"),
+    asset!("cola-header.css", "text/css; charset=utf-8"),
 ];
 
 /// URL → asset, exactly the routes registered by `create_app`.
@@ -180,6 +185,7 @@ pub fn route_asset(path: &str) -> Option<&'static Asset> {
         "/cola-theme.css" => "cola-theme.css",
         "/cola-theme-init.js" => "cola-theme-init.js",
         "/cola-theme.js" => "cola-theme.js",
+        "/cola-header.css" => "cola-header.css",
         _ => return None,
     };
     ASSETS.iter().find(|asset| asset.name == name)
@@ -323,13 +329,69 @@ mod tests {
     }
 
     #[test]
-    fn embedded_assets_are_byte_identical_to_the_pinned_frontend() {
+    fn embedded_assets_match_the_manifest() {
         let manifest = include_str!("../../compat/static-assets.sha256");
-        assert_eq!(manifest.lines().count(), ASSETS.len());
-        for line in manifest.lines() {
+        let entries: Vec<_> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(entries.len(), ASSETS.len());
+        for line in entries {
             let (digest, name) = line.split_once("  ").unwrap();
             let asset = ASSETS.iter().find(|a| a.name == name).unwrap();
             assert_eq!(crate::py::sha256_hex(asset.bytes), digest, "{name}");
         }
+    }
+
+    #[test]
+    fn header_fallback_css_is_an_unedited_provider_copy() {
+        // Written by scripts/vendor-header-css.py; the recorded hash covers everything after the note.
+        let css = std::str::from_utf8(route_asset("/cola-header.css").unwrap().bytes).unwrap();
+        let (note, body) = css.split_once(" */\n").unwrap();
+        let recorded = note.rsplit_once("source-sha256: ").unwrap().1;
+        assert_eq!(crate::py::sha256_hex(body.as_bytes()), recorded);
+        // Scoped to the undefined element, so a stale copy never restyles the live header.
+        let mut rules = String::new();
+        for (index, part) in body.split("/*").enumerate() {
+            rules.push_str(if index == 0 {
+                part
+            } else {
+                part.split_once("*/").unwrap().1
+            });
+        }
+        assert!(!rules.contains(":host") && !rules.contains("@import"));
+        for rule in rules.split('}').filter(|rule| rule.contains('{')) {
+            let selectors = rule.rsplit('{').nth(1).unwrap();
+            for selector in selectors.split(',') {
+                assert!(
+                    selector.trim().starts_with("cola-header:not(:defined)"),
+                    "{selector}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn csp_allows_only_the_header_provider_beyond_self() {
+        let directives: Vec<_> = CSP.split("; ").collect();
+        for directive in ["script-src", "connect-src"] {
+            assert!(
+                directives
+                    .contains(&format!("{directive} 'self' https://apps.cola16.app").as_str())
+            );
+        }
+        for kept in [
+            "default-src 'none'",
+            "worker-src 'self'",
+            "style-src 'self'",
+            "img-src 'self'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+            "form-action 'self'",
+        ] {
+            assert!(directives.contains(&kept), "{kept}");
+        }
+        assert_eq!(directives.len(), 9);
+        assert!(!CSP.contains("unsafe") && !CSP.contains('*') && !CSP.contains("https: "));
     }
 }

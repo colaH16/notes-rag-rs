@@ -438,9 +438,32 @@ WEB_CASES = [
 SECURITY_HEADERS = ('Cache-Control', 'X-Content-Type-Options', 'Referrer-Policy', 'X-Robots-Tag', 'Content-Security-Policy')
 
 
-def normalize_web(status, headers, raw):
+# Approved UI divergence (README §9): the Rust pages use the shared cola16 header. The static
+# page shells are pinned by compat/static-assets.sha256 and cargo tests instead; a rendered
+# reader page is compared by everything the backend puts into it.
+PROVIDER = 'https://apps.cola16.app'
+UI_SHELLS = {'index', 'graph-page'}
+READER_PARTS = (r'data-audience="[^"]*"', r'<h1 class="page-title">.*?</h1>', r'<p class="page-path">.*?</p>',
+                r'<article>.*?</article>', r'<span>[^<]*</span><a href="[^"]*" target="_blank"')
+
+
+def expected_rust_csp(python_csp):
+    # Only the header provider's script and navigation.json are added.
+    return python_csp and python_csp.replace("script-src 'self'", f"script-src 'self' {PROVIDER}") \
+        .replace("connect-src 'self'", f"connect-src 'self' {PROVIDER}")
+
+
+def normalize_web(name, status, headers, raw):
     lower = {k.lower(): v for k, v in headers.items()}
-    body = decoded(raw) if lower.get('content-type', '').startswith('application/json') else hashlib.sha256(raw).hexdigest()
+    text = raw.decode(errors='replace')
+    if lower.get('content-type', '').startswith('application/json'):
+        body = decoded(raw)
+    elif name in UI_SHELLS:
+        body = 'ui-shell'
+    elif lower.get('content-type', '').startswith('text/html') and '<h1 class="page-title">' in text:
+        body = [re.findall(part, text, re.S) for part in READER_PARTS]
+    else:
+        body = hashlib.sha256(raw).hexdigest()
     body = strip_volatile(body)
     return {'status': status, 'type': lower.get('content-type'), 'retry': lower.get('retry-after'),
             'disposition': lower.get('content-disposition'),
@@ -449,8 +472,9 @@ def normalize_web(status, headers, raw):
 
 def compare_web(python_base, rust_base):
     for name, method, path, headers, body in WEB_CASES:
-        python = normalize_web(*http(method, python_base + path, dict(headers), body))
-        rust = normalize_web(*http(method, rust_base + path, dict(headers), body))
+        python = normalize_web(name, *http(method, python_base + path, dict(headers), body))
+        rust = normalize_web(name, *http(method, rust_base + path, dict(headers), body))
+        python['security'][-1] = expected_rust_csp(python['security'][-1])
         check('web:' + name, python == rust, {'python': python, 'rust': rust})
 
 
