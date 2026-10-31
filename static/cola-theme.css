@@ -11,8 +11,8 @@ button,input,select{font:inherit}a{text-underline-offset:.2em}button,a,summary,s
 :where(a,button,input,select,summary,canvas,[tabindex]):focus-visible{outline:3px solid var(--cola-focus);outline-offset:3px}
 [hidden]{display:none!important}
 /* <cola-header> styles itself from https://apps.cola16.app/branding/v1/cola-header.js; /cola-header.css is
-   its scoped no-JS/provider-failure fallback. The page owns only placement (normal flow) and slot="account". */
-.cola-account a,.cola-account button{display:inline-flex;align-items:center;min-height:44px;margin:0;font-size:14px;line-height:1.5}.cola-account a{color:var(--cola-text);text-decoration:underline}.cola-account button{padding:0 12px;border:1px solid var(--cola-border);border-radius:4px;background:var(--cola-surface);color:var(--cola-text);cursor:pointer}.cola-account button:hover{background:var(--cola-raised);color:var(--cola-text)}
+   its scoped no-JS/provider-failure fallback. The page owns only placement (normal flow) and the slot="account"
+   #login/#logout, which the header styles as its shared account buttons. */
 /* Library access and reader tools are page content below the header, so they never change its height. */
 .cola-access{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0 0}.cola-graph .cola-access{margin:0 0 16px}
 .reader-tools{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;font-size:14px}.reader-tools a{display:inline-flex;align-items:center;min-height:44px}.reader-tools span{color:var(--muted);font-size:13px}

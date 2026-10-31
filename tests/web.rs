@@ -471,17 +471,24 @@ async fn search_and_graph_share_the_cola_header() {
     ] {
         let html = get(&app, path, &[]).await.text();
         let main = shared_header(&html, current);
-        // Library access is page content; login/logout stay host-owned in the account slot.
+        // Library access is page content. Login/logout stay host-owned, start hidden until the
+        // session check, and are direct account-slot children so the header styles them as
+        // its shared account buttons (no wrapper, no page-specific button styles).
         assert!(main.contains(badge) && !html.split("<main").next().unwrap().contains(badge));
         let account = html
-            .split("<div slot=\"account\" class=\"cola-account\">")
+            .split("</header>")
             .nth(1)
             .unwrap()
-            .split("</div>")
+            .split("</cola-header>")
             .next()
             .unwrap();
-        assert!(account.contains(&format!("<a id=\"login\" {login} hidden>")));
-        assert!(account.contains("<button id=\"logout\" type=\"button\" hidden>로그아웃</button>"));
+        assert_eq!(
+            account,
+            format!(
+                "<a id=\"login\" slot=\"account\" {login} hidden>로그인</a><button id=\"logout\" slot=\"account\" type=\"button\" hidden>로그아웃</button>"
+            )
+        );
+        assert!(!html.contains("cola-account"));
     }
     let init = get(&app, "/cola-theme-init.js", &[]).await.text();
     assert!(init.contains("'#191719':'#F4F0F1'"));

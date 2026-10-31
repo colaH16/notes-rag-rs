@@ -360,6 +360,13 @@ mod tests {
             });
         }
         assert!(!rules.contains(":host") && !rules.contains("@import"));
+        // The shared account-button style sets `display`; `hidden` #login/#logout must still
+        // stay hidden until the session check (no logout on public pages).
+        assert!(
+            rules.contains(
+                "cola-header:not(:defined)>[slot=account][hidden]{display:none!important}"
+            )
+        );
         for rule in rules.split('}').filter(|rule| rule.contains('{')) {
             let selectors = rule.rsplit('{').nth(1).unwrap();
             for selector in selectors.split(',') {
